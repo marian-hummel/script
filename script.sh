@@ -98,17 +98,6 @@ rm -f /etc/systemd/system/update-ingress-dnat.timer
 systemctl daemon-reload
 log "OK" "Old timer files removed"
 
-echo "[*] Flushing all iptables rules (legacy cleanup)..."
-iptables -t nat -F 2>/dev/null || true
-iptables -t nat -X 2>/dev/null || true
-iptables -F 2>/dev/null || true
-iptables -X 2>/dev/null || true
-log "OK" "iptables rules flushed"
-
-echo "[*] Flushing all nftables rules..."
-nft flush ruleset
-log "OK" "nftables rules flushed"
-
 echo "[*] Removing old DNAT update script..."
 rm -f /usr/local/bin/update-ingress-dnat.sh
 log "OK" "Old update script removed"
@@ -164,6 +153,17 @@ if [ "$all_ok" = false ]; then
     handle_error 1 "Required tools missing after installation" "CRITICAL"
 fi
 log "OK" "All required tools verified"
+
+echo "[*] Flushing all iptables rules (legacy cleanup)..."
+iptables -t nat -F 2>/dev/null || true
+iptables -t nat -X 2>/dev/null || true
+iptables -F 2>/dev/null || true
+iptables -X 2>/dev/null || true
+log "OK" "iptables rules flushed"
+
+echo "[*] Flushing all nftables rules..."
+nft flush ruleset || handle_error 1 "nftables flush failed" "CRITICAL"
+log "OK" "nftables rules flushed"
 
 # ====================================================================================
 # STEP 3: SYSTEM VERIFICATION

@@ -236,44 +236,34 @@ fi
 if ip addr show wt0 2>/dev/null | grep -q "inet "; then
     log "OK" "Netbird already connected"
 else
-    echo "[*] Netbird not connected - attempting reconnect..."
+    echo "[*] Netbird not connected."
     if ! systemctl is-active --quiet netbird; then
         systemctl start netbird 2>/dev/null || true
         sleep 5
     fi
-    netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
-        --enable-ssh-remote-port-forwarding --enable-ssh-sftp --enable-ssh-root 2>/dev/null || true
-    connected=false
-    for i in 1 2 3 4 5 6 7 8; do
-        sleep 2
-        if netbird status 2>/dev/null | grep -q "Management: Connected"; then
-            connected=true
+    echo ""
+    echo "[INFO] A Netbird setup key is required to connect."
+    while true; do
+        read -p "Enter Netbird setup key (or 'skip'): " netbird_key < /dev/tty
+        if [ "$netbird_key" = "skip" ] || [ "$netbird_key" = "Skip" ]; then
+            echo "[WARN] Skipping Netbird"
+            connected=false
+            break
+        elif [ -n "$netbird_key" ]; then
+            netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
+                --enable-ssh-remote-port-forwarding --enable-ssh-sftp \
+                --enable-ssh-root --setup-key "$netbird_key" || true
+            connected=false
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 2
+                if netbird status 2>/dev/null | grep -q "Management: Connected"; then
+                    connected=true
+                    break
+                fi
+            done
             break
         fi
     done
-    if [ "$connected" = false ]; then
-        echo ""
-        echo "[INFO] Netbird could not reconnect. A setup key is needed."
-        while true; do
-            read -p "Enter Netbird setup key (or 'skip'): " netbird_key < /dev/tty
-            if [ "$netbird_key" = "skip" ] || [ "$netbird_key" = "Skip" ]; then
-                echo "[WARN] Skipping Netbird"
-                break
-            elif [ -n "$netbird_key" ]; then
-                netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
-                    --enable-ssh-remote-port-forwarding --enable-ssh-sftp \
-                    --enable-ssh-root --setup-key "$netbird_key" || true
-                for i in 1 2 3 4 5 6 7 8 9 10; do
-                    sleep 2
-                    if netbird status 2>/dev/null | grep -q "Management: Connected"; then
-                        connected=true
-                        break
-                    fi
-                done
-                break
-            fi
-        done
-    fi
     if [ "$connected" = true ]; then
         log "OK" "Netbird connected"
     fi
@@ -300,41 +290,32 @@ fi
 if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
     log "OK" "Tailscale already connected"
 else
-    echo "[*] Tailscale not connected - attempting reconnect..."
+    echo "[*] Tailscale not connected."
     if ! systemctl is-active --quiet tailscaled; then
         systemctl start tailscaled 2>/dev/null || true
         sleep 5
     fi
-    tailscale up --accept-routes --accept-dns=false 2>/dev/null || true
-    connected=false
-    for i in 1 2 3 4 5 6 7 8; do
-        sleep 2
-        if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
-            connected=true
+    echo ""
+    echo "[INFO] A Tailscale auth key is required to connect."
+    while true; do
+        read -p "Enter Tailscale auth key (or 'skip'): " tailscale_key < /dev/tty
+        if [ "$tailscale_key" = "skip" ] || [ "$tailscale_key" = "Skip" ]; then
+            echo "[WARN] Skipping Tailscale"
+            connected=false
+            break
+        elif [ -n "$tailscale_key" ]; then
+            tailscale up --auth-key "$tailscale_key" --accept-routes --accept-dns=false || true
+            connected=false
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 2
+                if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
+                    connected=true
+                    break
+                fi
+            done
             break
         fi
     done
-    if [ "$connected" = false ]; then
-        echo ""
-        echo "[INFO] Tailscale could not reconnect. An auth key is needed."
-        while true; do
-            read -p "Enter Tailscale auth key (or 'skip'): " tailscale_key < /dev/tty
-            if [ "$tailscale_key" = "skip" ] || [ "$tailscale_key" = "Skip" ]; then
-                echo "[WARN] Skipping Tailscale"
-                break
-            elif [ -n "$tailscale_key" ]; then
-                tailscale up --auth-key "$tailscale_key" --accept-routes --accept-dns=false || true
-                for i in 1 2 3 4 5 6 7 8 9 10; do
-                    sleep 2
-                    if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
-                        connected=true
-                        break
-                    fi
-                done
-                break
-            fi
-        done
-    fi
     if [ "$connected" = true ]; then
         log "OK" "Tailscale connected"
     fi

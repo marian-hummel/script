@@ -243,17 +243,16 @@ else
     fi
     echo ""
     echo "[INFO] A Netbird setup key is required to connect."
+    connected=false
     while true; do
         read -p "Enter Netbird setup key (or 'skip'): " netbird_key < /dev/tty
         if [ "$netbird_key" = "skip" ] || [ "$netbird_key" = "Skip" ]; then
             echo "[WARN] Skipping Netbird"
-            connected=false
             break
         elif [ -n "$netbird_key" ]; then
-            netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
+            timeout 30 netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
                 --enable-ssh-remote-port-forwarding --enable-ssh-sftp \
-                --enable-ssh-root --setup-key "$netbird_key" || true
-            connected=false
+                --enable-ssh-root --setup-key "$netbird_key" 2>/dev/null || true
             for i in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 2
                 if netbird status 2>/dev/null | grep -q "Management: Connected"; then
@@ -261,7 +260,10 @@ else
                     break
                 fi
             done
-            break
+            if [ "$connected" = true ]; then
+                break
+            fi
+            echo "[WARN] Setup key rejected or connection timeout. Try again."
         fi
     done
     if [ "$connected" = true ]; then
@@ -297,15 +299,14 @@ else
     fi
     echo ""
     echo "[INFO] A Tailscale auth key is required to connect."
+    connected=false
     while true; do
         read -p "Enter Tailscale auth key (or 'skip'): " tailscale_key < /dev/tty
         if [ "$tailscale_key" = "skip" ] || [ "$tailscale_key" = "Skip" ]; then
             echo "[WARN] Skipping Tailscale"
-            connected=false
             break
         elif [ -n "$tailscale_key" ]; then
-            tailscale up --auth-key "$tailscale_key" --accept-routes --accept-dns=false || true
-            connected=false
+            timeout 30 tailscale up --auth-key "$tailscale_key" --accept-routes --accept-dns=false 2>/dev/null || true
             for i in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 2
                 if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
@@ -313,7 +314,10 @@ else
                     break
                 fi
             done
-            break
+            if [ "$connected" = true ]; then
+                break
+            fi
+            echo "[WARN] Auth key rejected or connection timeout. Try again."
         fi
     done
     if [ "$connected" = true ]; then

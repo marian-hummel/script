@@ -79,30 +79,20 @@ log "INFO" "Backend address: $BACKEND_ADDRESS"
 echo ""
 
 # ====================================================================================
-# STEP 1: CLEANUP PREVIOUS CONFIGURATIONS
+# STEP 1: SYSTEM VERIFICATION
 # ====================================================================================
-print_section "1" "CLEANUP PREVIOUS CONFIGURATIONS"
+print_section "1" "SYSTEM VERIFICATION"
 
-echo "[*] Stopping and removing old ingress-edge.service..."
-systemctl stop ingress-edge.service 2>/dev/null || true
-systemctl disable ingress-edge.service 2>/dev/null || true
-rm -f /etc/systemd/system/ingress-edge.service
-systemctl daemon-reload
-log "OK" "Old service files removed"
-
-echo "[*] Cleaning up previous failover timer..."
-systemctl stop update-ingress-dnat.timer 2>/dev/null || true
-systemctl disable update-ingress-dnat.timer 2>/dev/null || true
-rm -f /etc/systemd/system/update-ingress-dnat.service
-rm -f /etc/systemd/system/update-ingress-dnat.timer
-systemctl daemon-reload
-log "OK" "Old timer files removed"
-
-echo "[*] Removing old DNAT update script..."
-rm -f /usr/local/bin/update-ingress-dnat.sh
-log "OK" "Old update script removed"
-
-log "OK" "Cleanup complete"
+echo "[*] Checking distribution..."
+if grep -q "VERSION_ID=\"13\"" /etc/os-release; then
+    log "OK" "System is Debian 13"
+    echo "[OK] System is Debian 13"
+else
+    log "ERROR" "This script only supports Debian 13!"
+    echo "[ERROR] This script only supports Debian 13!"
+    cat /etc/os-release
+    exit 1
+fi
 
 # ====================================================================================
 # STEP 2: PACKAGE INSTALLATION
@@ -154,6 +144,30 @@ if [ "$all_ok" = false ]; then
 fi
 log "OK" "All required tools verified"
 
+# ====================================================================================
+# STEP 3: CLEANUP & FIREWALL CLEANUP
+# ====================================================================================
+print_section "3" "CLEANUP & FIREWALL CLEANUP"
+
+echo "[*] Stopping and removing old ingress-edge.service..."
+systemctl stop ingress-edge.service 2>/dev/null || true
+systemctl disable ingress-edge.service 2>/dev/null || true
+rm -f /etc/systemd/system/ingress-edge.service
+systemctl daemon-reload
+log "OK" "Old service files removed"
+
+echo "[*] Cleaning up previous failover timer..."
+systemctl stop update-ingress-dnat.timer 2>/dev/null || true
+systemctl disable update-ingress-dnat.timer 2>/dev/null || true
+rm -f /etc/systemd/system/update-ingress-dnat.service
+rm -f /etc/systemd/system/update-ingress-dnat.timer
+systemctl daemon-reload
+log "OK" "Old timer files removed"
+
+echo "[*] Removing old DNAT update script..."
+rm -f /usr/local/bin/update-ingress-dnat.sh
+log "OK" "Old update script removed"
+
 echo "[*] Flushing all iptables rules (legacy cleanup)..."
 iptables -t nat -F 2>/dev/null || true
 iptables -t nat -X 2>/dev/null || true
@@ -165,21 +179,7 @@ echo "[*] Flushing all nftables rules..."
 nft flush ruleset || handle_error 1 "nftables flush failed" "CRITICAL"
 log "OK" "nftables rules flushed"
 
-# ====================================================================================
-# STEP 3: SYSTEM VERIFICATION
-# ====================================================================================
-print_section "3" "SYSTEM VERIFICATION"
-
-echo "[*] Checking distribution..."
-if grep -q "VERSION_ID=\"13\"" /etc/os-release; then
-    log "OK" "System is Debian 13"
-    echo "[OK] System is Debian 13"
-else
-    log "ERROR" "This script only supports Debian 13!"
-    echo "[ERROR] This script only supports Debian 13!"
-    cat /etc/os-release
-    exit 1
-fi
+log "OK" "Cleanup complete"
 
 # ====================================================================================
 # STEP 4: HOSTNAME CONFIGURATION

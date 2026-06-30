@@ -351,44 +351,66 @@ BACKEND_TS_IP=""
 VPN_TYPE=""
 
 # ---- Primary: Netbird DNS ----
+BACKEND_NB_IP=""
+BACKEND_TS_IP=""
+BACKEND_IP=""
+VPN_TYPE=""
+
+# ---- Step A: Discover BOTH IPs (Netbird + Tailscale) ----
+echo "[*] Discovering backend IPs on both VPNs..."
+
+# Netbird DNS
 echo "[*] Resolving via Netbird DNS: $BACKEND_ADDRESS..."
-for i in $(seq 1 15); do
-    BACKEND_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
-    if [ -n "$BACKEND_IP" ]; then
+for i in $(seq 1 10); do
+    BACKEND_NB_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -n "$BACKEND_NB_IP" ]; then
+        echo "[OK] Netbird IP: $BACKEND_NB_IP"
         break
     fi
-    echo "[INFO] Waiting for DNS... (attempt $i/15)"
+    echo "[INFO] Waiting for Netbird DNS... (attempt $i/10)"
     sleep 2
 done
 
-if [ -n "$BACKEND_IP" ]; then
-    VPN_TYPE="Netbird"
-    echo "$BACKEND_IP" > "$CACHE_FILE"
-    echo "[OK] Netbird DNS: $BACKEND_ADDRESS -> $BACKEND_IP"
-else
-    echo "[WARN] Netbird DNS resolution failed"
-fi
-
-# ---- Secondary: Tailscale ----
-echo "[*] Checking Tailscale for backend IP..."
+# Tailscale — search for "backend" in magic DNS name
+echo "[*] Resolving via Tailscale magic DNS..."
 if command -v tailscale >/dev/null 2>&1 && ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
     BACKEND_TS_IP=$(timeout 10 tailscale status 2>/dev/null \
-        | grep -i "ma" \
+        | grep -i "backend" \
         | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' \
         | head -1)
     if [ -n "$BACKEND_TS_IP" ]; then
-        echo "[OK] Tailscale: $BACKEND_TS_IP"
-        if [ -z "$BACKEND_IP" ]; then
-            BACKEND_IP="$BACKEND_TS_IP"
-            VPN_TYPE="Tailscale"
-            echo "$BACKEND_IP" > "$CACHE_FILE"
-        fi
+        echo "[OK] Tailscale IP: $BACKEND_TS_IP"
     else
-        echo "[INFO] No Tailscale match for backend"
+        echo "[INFO] No Tailscale match for 'backend'"
     fi
 fi
 
-# ---- Fallback: cached IP ----
+# ---- Step B: Pick the one that actually works ----
+echo "[*] Testing reachability..."
+
+if [ -n "$BACKEND_NB_IP" ]; then
+    echo -n "  Netbird $BACKEND_NB_IP:81... "
+    if curl -k -s --connect-timeout 3 --max-time 5 "https://$BACKEND_NB_IP:81" >/dev/null 2>&1; then
+        BACKEND_IP="$BACKEND_NB_IP"
+        VPN_TYPE="Netbird"
+        echo "[OK]"
+    else
+        echo "[FAIL]"
+    fi
+fi
+
+if [ -z "$BACKEND_IP" ] && [ -n "$BACKEND_TS_IP" ]; then
+    echo -n "  Tailscale $BACKEND_TS_IP:81... "
+    if curl -k -s --connect-timeout 3 --max-time 5 "https://$BACKEND_TS_IP:81" >/dev/null 2>&1; then
+        BACKEND_IP="$BACKEND_TS_IP"
+        VPN_TYPE="Tailscale"
+        echo "[OK]"
+    else
+        echo "[FAIL]"
+    fi
+fi
+
+# ---- Step C: Fallback to cache ----
 if [ -z "$BACKEND_IP" ] && [ -f "$CACHE_FILE" ]; then
     BACKEND_IP=$(cat "$CACHE_FILE")
     VPN_TYPE="Cache"
@@ -396,20 +418,13 @@ if [ -z "$BACKEND_IP" ] && [ -f "$CACHE_FILE" ]; then
 fi
 
 if [ -z "$BACKEND_IP" ]; then
-    handle_error 1 "Cannot find backend IP (DNS + Tailscale + cache all failed)" "CRITICAL"
+    handle_error 1 "Cannot reach backend on any VPN (Netbird + Tailscale + cache all failed)" "CRITICAL"
 fi
 
-echo "[OK] Active backend IP: $BACKEND_IP ($VPN_TYPE)"
-if [ -n "$BACKEND_TS_IP" ]; then
-    echo "[INFO] Tailscale fallback IP: $BACKEND_TS_IP"
-fi
-
-echo "[*] Testing backend reachability on port 81..."
-echo -n "  $BACKEND_IP:81... "
-if curl -k -s --connect-timeout 5 --max-time 10 "https://$BACKEND_IP:81" >/dev/null 2>&1; then
-    echo "[OK] reachable"
-else
-    echo "[WARN] not reachable (will proceed anyway)"
+echo "$BACKEND_IP" > "$CACHE_FILE"
+echo "[OK] Active backend: $BACKEND_IP ($VPN_TYPE)"
+if [ -n "$BACKEND_TS_IP" ] && [ "$BACKEND_IP" != "$BACKEND_TS_IP" ]; then
+    echo "[INFO] Tailscale fallback available: $BACKEND_TS_IP"
 fi
 
 # ====================================================================================
@@ -575,7 +590,7 @@ cat > "$UPDATE_SCRIPT" << 'DNATSCRIPT'
 # Updates the nftables DNAT target based on available VPN connectivity.
 # Called by systemd timer every 60 seconds to handle VPN failover.
 #
-# Priority: Netbird DNS > Tailscale status > Cached IP
+# Logic: discover both IPs, test reachability, use the working one.
 # ====================================================================================
 
 BACKEND_ADDRESS="reversed-proxy.ma.internal"
@@ -589,36 +604,47 @@ log() {
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
 }
 
+BACKEND_NB_IP=""
+BACKEND_TS_IP=""
 BACKEND_IP=""
 VPN_TYPE=""
 
-# 1) Try Netbird DNS (primary path)
+# 1) Discover Netbird IP
 if ip addr show wt0 2>/dev/null | grep -q "inet "; then
-    BACKEND_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
-    if [ -n "$BACKEND_IP" ]; then
+    BACKEND_NB_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
+fi
+
+# 2) Discover Tailscale IP — search for "backend" in magic DNS
+if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
+    BACKEND_TS_IP=$(timeout 10 tailscale status 2>/dev/null \
+        | grep -i "backend" \
+        | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' \
+        | head -1)
+fi
+
+# 3) Test reachability — pick the one that works
+if [ -n "$BACKEND_NB_IP" ]; then
+    if curl -k -s --connect-timeout 3 --max-time 5 "https://$BACKEND_NB_IP:81" >/dev/null 2>&1; then
+        BACKEND_IP="$BACKEND_NB_IP"
         VPN_TYPE="Netbird"
     fi
 fi
 
-# 2) Fall back to Tailscale
-if [ -z "$BACKEND_IP" ] && ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
-    BACKEND_IP=$(timeout 10 tailscale status 2>/dev/null \
-        | grep -i "ma" \
-        | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' \
-        | head -1)
-    if [ -n "$BACKEND_IP" ]; then
+if [ -z "$BACKEND_IP" ] && [ -n "$BACKEND_TS_IP" ]; then
+    if curl -k -s --connect-timeout 3 --max-time 5 "https://$BACKEND_TS_IP:81" >/dev/null 2>&1; then
+        BACKEND_IP="$BACKEND_TS_IP"
         VPN_TYPE="Tailscale"
     fi
 fi
 
-# 3) Last resort: use cached IP
+# 4) Fallback: cached IP
 if [ -z "$BACKEND_IP" ] && [ -f "$CACHE_FILE" ]; then
     BACKEND_IP=$(cat "$CACHE_FILE")
     VPN_TYPE="Cache"
 fi
 
 if [ -z "$BACKEND_IP" ]; then
-    log "ERROR" "Cannot determine backend IP - DNAT not updated"
+    log "ERROR" "Cannot reach backend on any VPN - DNAT not updated"
     exit 1
 fi
 

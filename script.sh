@@ -124,12 +124,12 @@ apt upgrade -y || handle_error 1 "System upgrade failed" "ERROR"
 log "OK" "System upgrade complete"
 
 echo "[*] Installing required packages..."
-apt install -y nftables iptables python3 bind9-dnsutils iproute2 curl wget iputils-ping jq tcpdump || \
+apt install -y nftables iptables wireguard-tools python3 bind9-dnsutils iproute2 curl wget iputils-ping jq tcpdump || \
     handle_error 1 "Package installation failed" "CRITICAL"
 log "OK" "All packages installed"
 
 echo "[*] Verifying required tools..."
-critical_tools=("nft" "iptables" "python3" "getent" "ip" "curl" "wget" "ping" "ss" "tcpdump" "sysctl")
+critical_tools=("nft" "iptables" "wg" "python3" "getent" "ip" "curl" "wget" "ping" "ss" "tcpdump" "sysctl")
 all_ok=true
 for tool in "${critical_tools[@]}"; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -255,7 +255,7 @@ else
             echo "[*] Connecting to Netbird with provided key..."
             netbird up --allow-server-ssh --enable-ssh-local-port-forwarding \
                 --enable-ssh-remote-port-forwarding --enable-ssh-sftp \
-                --enable-ssh-root --setup-key "$netbird_key" || true
+                --enable-ssh-root --enable-rosenpass --setup-key "$netbird_key" || true
             for i in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 2
                 if netbird status 2>/dev/null | grep -q "Management: Connected"; then

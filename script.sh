@@ -641,17 +641,14 @@ log "OK" "Kernel parameters persistent"
 # ====================================================================================
 print_section "9" "NFTABLES CONFIGURATION"
 
-echo "[*] Generating nftables rules..."
+echo "[*] Writing /etc/nftables.conf..."
 
-# Write all rules to a temp file, then load with nft -f (avoids all bash escaping issues)
-NFT_TMP="/tmp/ingress-nft-rules.nft"
-cat > "$NFT_TMP" << NFTEOF
+# Use a QUOTED heredoc to prevent ALL bash expansion (no brace expansion, no variable expansion).
+# Placeholders (WANIF, BACKENDIP, INGRESSIP) are replaced via sed afterwards.
+cat > /etc/nftables.conf << 'NFTEOF'
 #!/usr/sbin/nft -f
 flush ruleset
 
-# ===================================================================
-# FILTER TABLE (inet = IPv4 + IPv6)
-# ===================================================================
 table inet filter {
 
     chain input {
@@ -660,24 +657,19 @@ table inet filter {
         ct state established,related accept
         iif lo accept
 
-        # ICMP
         icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
         icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
         icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
 
-        # WAN: HTTP/HTTPS/QUIC (IPv4 only)
-        meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
+        meta nfproto ipv4 iifname WANIF tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iifname WANIF udp dport 443 ct state new accept
 
-        # WAN: drop IPv6 on these ports
-        meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
+        meta nfproto ipv6 iifname WANIF tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iifname WANIF udp dport 443 drop
 
-        # VPN interfaces: full trust
         iifname wt0 accept
         iifname tailscale0 accept
 
-        # Anti-spoofing
         ip saddr 100.64.0.0/10 iifname != wt0 drop
         ip saddr 100.100.0.0/8 iifname != tailscale0 drop
     }
@@ -687,52 +679,51 @@ table inet filter {
 
         ct state established,related accept
 
-        # WAN -> VPN (IPv4 only)
-        meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
+        meta nfproto ipv4 iif WANIF oif wt0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif WANIF oif wt0 udp dport 443 ct state new accept
+        meta nfproto ipv4 iif WANIF oif tailscale0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif WANIF oif tailscale0 udp dport 443 ct state new accept
 
-        # Drop IPv6 forwarding on these ports
-        meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
-        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
+        meta nfproto ipv6 iif WANIF oif wt0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif WANIF oif wt0 udp dport 443 drop
+        meta nfproto ipv6 iif WANIF oif tailscale0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif WANIF oif tailscale0 udp dport 443 drop
     }
 }
 
-# ===================================================================
-# NAT TABLE (ip = IPv4 only)
-# ===================================================================
 table ip nat {
 
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
 
-        tcp dport { 80, 443 } dnat to ${BACKEND_IP}
-        udp dport 443 dnat to ${BACKEND_IP}
+        tcp dport { 80, 443 } dnat to BACKENDIP
+        udp dport 443 dnat to BACKENDIP
     }
 
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
 
-        oifname ${WAN_IF} ip saddr 100.64.0.0/10 snat to ${INGRESS_PUBLIC_IP}
-        oifname ${WAN_IF} ip saddr 100.100.0.0/8 snat to ${INGRESS_PUBLIC_IP}
+        oifname WANIF ip saddr 100.64.0.0/10 snat to INGRESSIP
+        oifname WANIF ip saddr 100.100.0.0/8 snat to INGRESSIP
     }
 }
 NFTEOF
 
+# Replace placeholders with actual values (sed on Linux does not need -i '' backup extension)
+sed -i "s|WANIF|${WAN_IF}|g" /etc/nftables.conf
+sed -i "s|BACKENDIP|${BACKEND_IP}|g" /etc/nftables.conf
+sed -i "s|INGRESSIP|${INGRESS_PUBLIC_IP}|g" /etc/nftables.conf
+
 echo "[*] Validating nftables syntax..."
-nft -c -f "$NFT_TMP" || handle_error 1 "nftables syntax invalid" "CRITICAL"
+nft -c -f /etc/nftables.conf || handle_error 1 "nftables syntax invalid" "CRITICAL"
 log "OK" "Syntax validated"
 
-echo "[*] Activating nftables firewall..."
-nft -f "$NFT_TMP" || handle_error 1 "nftables activation failed" "CRITICAL"
-log "OK" "nftables firewall active"
+echo "[*] Loading nftables rules via nft -f..."
+nft -f /etc/nftables.conf || handle_error 1 "nftables activation failed" "CRITICAL"
+log "OK" "nftables rules loaded"
 
-# Persist for reboots (nftables.service loads this on boot)
-cp "$NFT_TMP" /etc/nftables.conf
-rm -f "$NFT_TMP"
+# Ensure nftables.service is enabled so rules survive reboots
+systemctl enable nftables 2>/dev/null || true
 
 echo ""
 echo "[OK] nftables active:"
@@ -833,33 +824,18 @@ fi
 WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
-# Update nftables NAT table (DNAT + SNAT for return path)
-NFT_NAT="/tmp/ingress-nat.nft"
-cat > "$NFT_NAT" << NATEOF
-#!/usr/sbin/nft -f
-flush table ip nat
-
-table ip nat {
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        tcp dport { 80, 443 } dnat to ${BACKEND_IP}
-        udp dport 443 dnat to ${BACKEND_IP}
-    }
-    chain postrouting {
-        type nat hook postrouting priority srcnat; policy accept;
-NATEOF
+# Rebuild NAT table using individual nft add commands (avoids nft -f / temp file issues)
+nft flush table ip nat 2>/dev/null || true
+nft add table ip nat 2>/dev/null || true
+nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+nft add rule ip nat prerouting tcp dport 80 dnat to "$BACKEND_IP" 2>/dev/null || true
+nft add rule ip nat prerouting tcp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
+nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
 if [ -n "$WAN_IF" ] && [ -n "$INGRESS_PUBLIC_IP" ]; then
-    cat >> "$NFT_NAT" << SNATEOF
-        oifname ${WAN_IF} ip saddr 100.64.0.0/10 snat to ${INGRESS_PUBLIC_IP}
-        oifname ${WAN_IF} ip saddr 100.100.0.0/8 snat to ${INGRESS_PUBLIC_IP}
-SNATEOF
+    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
+    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
 fi
-cat >> "$NFT_NAT" << 'CLOSETABLE'
-    }
-}
-CLOSETABLE
-nft -f "$NFT_NAT" 2>/dev/null || true
-rm -f "$NFT_NAT"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1018,7 +994,7 @@ echo "--- C: INPUT Chain (host protection) ---"
 if [ "${T_B01:-FAIL}" = "PASS" ]; then
     INPUT_RULES=$(nft list chain inet filter input 2>/dev/null || true)
     check C01 "ct state established,related accept"          "echo '$INPUT_RULES' | grep -qF 'ct state established,related accept'"
-    check C02 "iif lo accept (loopback)"                     "echo '$INPUT_RULES' | grep -qF 'iif lo accept'"
+    check C02 "iif lo accept (loopback)"                     "echo '$INPUT_RULES' | grep -qE 'iif \"?lo\"? accept'"
     check C03 "ICMP echo-request/reply allowed"              "echo '$INPUT_RULES' | grep -q 'echo-request'"
     check C04 "ICMP destination-unreachable (path MTU)"      "echo '$INPUT_RULES' | grep -q 'destination-unreachable'"
     check C05 "ICMP time-exceeded (traceroute)"              "echo '$INPUT_RULES' | grep -q 'time-exceeded'"
@@ -1029,10 +1005,10 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
     check C10 "WAN UDP 443 open (IPv4, QUIC)"                "echo '$INPUT_RULES' | grep 'meta nfproto ipv4' | grep -q 'udp dport 443'"
     check C11 "WAN TCP 80+443 dropped (IPv6)"                "echo '$INPUT_RULES' | grep 'meta nfproto ipv6' | grep -qF 'dport { 80, 443 }'"
     check C12 "WAN UDP 443 dropped (IPv6)"                   "echo '$INPUT_RULES' | grep 'meta nfproto ipv6' | grep -q 'udp dport 443'"
-    check C13 "Netbird wt0 fully trusted"                    "echo '$INPUT_RULES' | grep -qF 'iifname wt0 accept'"
-    check C14 "Tailscale tailscale0 fully trusted"           "echo '$INPUT_RULES' | grep -qF 'iifname tailscale0 accept'"
-    check C15 "Anti-spoofing: 100.64.0.0/10 only on wt0"    "echo '$INPUT_RULES' | grep -q '100.64.0.0/10.*iifname != wt0'"
-    check C16 "Anti-spoofing: 100.100.0.0/8 only on ts0"    "echo '$INPUT_RULES' | grep -q '100.100.0.0/8.*iifname != tailscale0'"
+    check C13 "Netbird wt0 fully trusted"                    "echo '$INPUT_RULES' | grep -qE 'iifname \"?wt0\"? accept'"
+    check C14 "Tailscale tailscale0 fully trusted"           "echo '$INPUT_RULES' | grep -qE 'iifname \"?tailscale0\"? accept'"
+    check C15 "Anti-spoofing: 100.64.0.0/10 only on wt0"    "echo '$INPUT_RULES' | grep -qE '100.64.0.0/10.*iifname != \"?wt0\"?'"
+    check C16 "Anti-spoofing: 100.100.0.0/8 only on ts0"    "echo '$INPUT_RULES' | grep -qE '100.100.0.0/8.*iifname != \"?tailscale0\"?'"
 else
     echo "  [SKIP] C01-C16: nftables not running, cannot check INPUT chain"
     T_SKIP=$((T_SKIP + 16))
@@ -1044,12 +1020,12 @@ echo "--- D: FORWARD Chain (traffic forwarding) ---"
 if [ "${T_B01:-FAIL}" = "PASS" ]; then
     FWD_RULES=$(nft list chain inet filter forward 2>/dev/null || true)
     check D01 "ct state established,related accept"          "echo '$FWD_RULES' | grep -qF 'ct state established,related accept'"
-    check D02 "WAN→wt0 TCP 80+443 (IPv4)"                   "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -q 'oif wt0.*tcp dport.*80.*443'"
-    check D03 "WAN→wt0 UDP 443 (IPv4, QUIC)"                "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -q 'oif wt0.*udp dport 443'"
-    check D04 "WAN→tailscale0 TCP 80+443 (IPv4)"            "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -q 'oif tailscale0.*tcp dport.*80.*443'"
-    check D05 "WAN→tailscale0 UDP 443 (IPv4, QUIC)"         "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -q 'oif tailscale0.*udp dport 443'"
-    check D06 "IPv6 forward dropped (wt0)"                   "echo '$FWD_RULES' | grep 'meta nfproto ipv6' | grep -q 'oif wt0.*drop'"
-    check D07 "IPv6 forward dropped (tailscale0)"            "echo '$FWD_RULES' | grep 'meta nfproto ipv6' | grep -q 'oif tailscale0.*drop'"
+    check D02 "WAN→wt0 TCP 80+443 (IPv4)"                   "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -qE 'oif \"?wt0\"?.*tcp dport.*80.*443'"
+    check D03 "WAN→wt0 UDP 443 (IPv4, QUIC)"                "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -qE 'oif \"?wt0\"?.*udp dport 443'"
+    check D04 "WAN→tailscale0 TCP 80+443 (IPv4)"            "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -qE 'oif \"?tailscale0\"?.*tcp dport.*80.*443'"
+    check D05 "WAN→tailscale0 UDP 443 (IPv4, QUIC)"         "echo '$FWD_RULES' | grep 'meta nfproto ipv4' | grep -qE 'oif \"?tailscale0\"?.*udp dport 443'"
+    check D06 "IPv6 forward dropped (wt0)"                   "echo '$FWD_RULES' | grep 'meta nfproto ipv6' | grep -qE 'oif \"?wt0\"?.*drop'"
+    check D07 "IPv6 forward dropped (tailscale0)"            "echo '$FWD_RULES' | grep 'meta nfproto ipv6' | grep -qE 'oif \"?tailscale0\"?.*drop'"
 else
     echo "  [SKIP] D01-D07: nftables not running, cannot check FORWARD chain"
     T_SKIP=$((T_SKIP + 7))

@@ -824,18 +824,31 @@ fi
 WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
-# Rebuild NAT table using individual nft add commands (avoids nft -f / temp file issues)
-nft flush table ip nat 2>/dev/null || true
-nft add table ip nat 2>/dev/null || true
-nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport 80 dnat to "$BACKEND_IP" 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
-nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
-if [ -n "$WAN_IF" ] && [ -n "$INGRESS_PUBLIC_IP" ]; then
-    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
-    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
-fi
+# Rebuild NAT table — write to temp file with quoted heredoc (no bash expansion),
+# replace placeholders via sed, then load with nft -f
+NFT_NAT="/tmp/ingress-nat.nft"
+cat > "$NFT_NAT" << 'NATEOF'
+flush table ip nat
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        tcp dport 80 dnat to BACKENDIP
+        tcp dport 443 dnat to BACKENDIP
+        udp dport 443 dnat to BACKENDIP
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "WANIF" ip saddr 100.64.0.0/10 snat to INGRESSIP
+        oifname "WANIF" ip saddr 100.100.0.0/8 snat to INGRESSIP
+    }
+}
+NATEOF
+sed -i "s|BACKENDIP|$BACKEND_IP|g" "$NFT_NAT"
+sed -i "s|WANIF|$WAN_IF|g" "$NFT_NAT"
+sed -i "s|INGRESSIP|$INGRESS_PUBLIC_IP|g" "$NFT_NAT"
+nft -f "$NFT_NAT" 2>/dev/null || true
+rm -f "$NFT_NAT"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1040,15 +1053,15 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
     check E01 "NAT table exists"                             "nft list tables 2>/dev/null | grep -q 'ip nat'"
     check E02 "prerouting chain exists"                      "echo '$NAT_PRE' | grep -q 'type nat hook prerouting'"
     check E03 "postrouting chain exists"                     "echo '$NAT_POST' | grep -q 'type nat hook postrouting'"
-    check E04 "DNAT TCP 80+443 present"                      "echo '$NAT_PRE' | grep -q 'tcp dport.*80.*443.*dnat'"
+    check E04 "DNAT TCP 80+443 present"                      "echo '$NAT_PRE' | grep -q 'tcp dport 80.*dnat' && echo '$NAT_PRE' | grep -q 'tcp dport 443.*dnat'"
     check E05 "DNAT UDP 443 present (QUIC)"                  "echo '$NAT_PRE' | grep -q 'udp dport 443.*dnat'"
     check E06 "DNAT target is $BACKEND_IP"                   "echo '$NAT_PRE' | grep 'dnat to' | grep -q '$BACKEND_IP'"
     check E07 "SNAT for 100.64.0.0/10 present"              "echo '$NAT_POST' | grep -q '100.64.0.0/10.*snat'"
     check E08 "SNAT for 100.100.0.0/8 present"              "echo '$NAT_POST' | grep -q '100.100.0.0/8.*snat'"
     check E09 "SNAT target is $INGRESS_PUBLIC_IP"            "echo '$NAT_POST' | grep 'snat to' | grep -q '$INGRESS_PUBLIC_IP'"
-    check E10 "DNAT count = 2 (TCP+UDP)"                     "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 2 ]"
+    check E10 "DNAT count = 3 (TCP 80, TCP 443, UDP 443)"   "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 3 ]"
     check E11 "SNAT count = 2 (Netbird+TS)"                  "[ \$(echo '$NAT_POST' | grep -c 'snat to') -eq 2 ]"
-    DNAT_TARGETS=$(echo "$NAT_PRE" | grep 'dnat to' | sed 's/.*dnat to //' | tr -d '{}' | sort -u | tr '\n' ' ')
+    DNAT_TARGETS=$(echo "$NAT_PRE" | grep 'dnat to' | sed 's/.*dnat to //' | sort -u | tr '\n' ' ')
 else
     echo "  [SKIP] E01-E11: nftables not running, cannot check NAT"
     T_SKIP=$((T_SKIP + 11))
@@ -1383,10 +1396,10 @@ fi
 
 # ── 10. nftables persistence ───────────────────────────────────────────────────
 if [ "${T_K02:-FAIL}" = "FAIL" ]; then
-    issue "WARN" "nftables rules do NOT survive restart — NAT table lost on reboot"
-    echo "             → The static config (/etc/nftables.conf) only has the filter table"
-    echo "             → The NAT table is added at runtime by the systemd service"
-    echo "             This is expected — ingress-edge.service re-applies NAT on boot"
+    issue "WARN" "nftables rules do NOT survive restart — NAT target may change on reboot"
+    echo "             → /etc/nftables.conf has filter + NAT tables from initial setup"
+    echo "             → DNAT timer may update NAT targets after boot (different backend IP)"
+    echo "             This is expected — ingress-edge.service + DNAT timer re-apply on boot"
 fi
 
 # ── 11. End-to-end ────────────────────────────────────────────────────────────

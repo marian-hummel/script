@@ -337,6 +337,25 @@ if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
     ts_ip=$(ip addr show tailscale0 | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 fi
 
+# ---- WireGuard Health Check ----
+echo ""
+echo "[*] Checking WireGuard peer endpoints..."
+for iface in wt0 tailscale0; do
+    if ip addr show "$iface" 2>/dev/null | grep -q "inet "; then
+        endpoints=$(wg show "$iface" endpoints 2>/dev/null | head -1)
+        if [ -n "$endpoints" ]; then
+            endpoint=$(echo "$endpoints" | awk '{print $2}')
+            if echo "$endpoint" | grep -qE '^(127\.0\.0\.1|0\.0\.0\.0|::1)'; then
+                log "ERROR" "$iface: endpoint is $endpoint — invalid (localhost)"
+                echo "[WARN] $iface: Endpoint $endpoint is invalid — VPN tunnel broken!"
+                echo "[INFO] Try reconnecting: netbird down && netbird up (with --enable-rosenpass)"
+            else
+                echo "[OK] $iface endpoint: $endpoint"
+            fi
+        fi
+    fi
+done
+
 # ====================================================================================
 # STEP 6: BACKEND IP DISCOVERY (Netbird + Tailscale)
 # ====================================================================================
@@ -346,11 +365,6 @@ fi
 # ====================================================================================
 print_section "6" "BACKEND IP DISCOVERY (DUAL VPN)"
 
-BACKEND_IP=""
-BACKEND_TS_IP=""
-VPN_TYPE=""
-
-# ---- Primary: Netbird DNS ----
 BACKEND_NB_IP=""
 BACKEND_TS_IP=""
 BACKEND_IP=""
@@ -475,6 +489,14 @@ modprobe nf_conntrack 2>/dev/null || true
 sysctl -w net.netfilter.nf_conntrack_max=262144 2>/dev/null || true
 sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=3600 2>/dev/null || true
 
+echo "[*] Ensuring backup default route via WAN interface..."
+WAN_GW=$(ip route show default | awk '{print $3}' | head -1)
+if [ -n "$WAN_GW" ]; then
+    # Add backup default route with high metric so VPN doesn't break internet
+    ip route add default via "$WAN_GW" dev "$WAN_IF" metric 1000 2>/dev/null || true
+    log "OK" "Backup default route via $WAN_GW ($WAN_IF, metric 1000)"
+fi
+
 echo "[*] Making kernel parameters persistent..."
 cat > /etc/sysctl.d/99-ingress.conf << 'EOF'
 # Ingress Edge Firewall Kernel Parameters
@@ -523,11 +545,15 @@ echo 'lines.append("    chain input {")' >> /root/nft_gen.py
 echo 'lines.append("        type filter hook input priority filter; policy drop;")' >> /root/nft_gen.py
 echo 'lines.append("        ct state established,related accept")' >> /root/nft_gen.py
 echo 'lines.append("        iif lo accept")' >> /root/nft_gen.py
-echo 'lines.append("        tcp dport 80 ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append("        tcp dport 443 ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append("        udp dport 443 ct state new accept")' >> /root/nft_gen.py
+echo 'lines.append("        # ICMP (for ping, path-mtu discovery, traceroute)")' >> /root/nft_gen.py
+echo 'lines.append("        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept")' >> /root/nft_gen.py
+echo 'lines.append("        # From outside: only HTTP/HTTPS/QUIC")' >> /root/nft_gen.py
+echo 'lines.append(f"        iifname {WAN_IF} tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
+echo 'lines.append(f"        iifname {WAN_IF} udp dport 443 ct state new accept")' >> /root/nft_gen.py
+echo 'lines.append("        # VPN-Interfaces: alles erlauben")' >> /root/nft_gen.py
 echo 'lines.append("        iifname wt0 accept")' >> /root/nft_gen.py
 echo 'lines.append("        iifname tailscale0 accept")' >> /root/nft_gen.py
+echo 'lines.append("        # Spoofing-Schutz: VPN-IPs nur auf VPN-Interfaces")' >> /root/nft_gen.py
 echo 'lines.append("        ip saddr 100.64.0.0/10 iifname != wt0 drop")' >> /root/nft_gen.py
 echo 'lines.append("        ip saddr 100.100.0.0/8 iifname != tailscale0 drop")' >> /root/nft_gen.py
 echo 'lines.append("    }")' >> /root/nft_gen.py
@@ -911,35 +937,24 @@ if ss -ulnp | grep -q ":443 "; then echo "[OK] bound"; else echo "[INFO] not bou
 # --- TEST 6: External ---
 echo ""
 echo "[TEST 6/7] External access..."
-curl_output=$(curl -kv --connect-timeout 5 --max-time 8 "https://$INGRESS_PUBLIC_IP" 2>&1) || true
-if echo "$curl_output" | grep -q "Connected to"; then
-    echo "  [OK] Cloud firewall: ports reachable"
-else
-    echo "  [ERROR] Cloud firewall may be blocking traffic!"
-    echo ""
-    echo "  Open these ports in Netcup firewall:"
-    echo "    - TCP 80  (HTTP)"
-    echo "    - TCP 443 (HTTPS)"
-    echo "    - UDP 443 (QUIC)"
-    echo ""
-fi
-
+echo "  [INFO] Testing from the server itself won't work for DNAT."
+echo "  [INFO] Test from an external machine with:"
+echo "    curl -kv https://$INGRESS_PUBLIC_IP"
 echo ""
-echo "--- CURL OUTPUT (first 20 lines) ---"
-curl -kv --connect-timeout 10 --max-time 15 "https://$INGRESS_PUBLIC_IP" 2>&1 | head -20 || true
+echo "--- CURL FROM SERVER (expected to fail - hairpin NAT) ---"
+curl -kv --connect-timeout 5 --max-time 8 "https://$INGRESS_PUBLIC_IP" 2>&1 | head -10 || true
 echo "--- END ---"
 echo ""
-
-read -p "Does the output look correct? (y/n): " test6_ok < /dev/tty
-if [ "$test6_ok" = "y" ] || [ "$test6_ok" = "Y" ]; then
-    echo "  [OK] Confirmed"
+echo "  [INFO] The curl from this server to its own public IP"
+echo "  [INFO] does NOT go through DNAT (it's local traffic)."
+echo "  [INFO] This test is ONLY valid from an EXTERNAL machine."
+echo ""
+read -p "Have you tested from an external machine (laptop/phone)? (y/n): " external_tested < /dev/tty
+if [ "$external_tested" = "y" ] || [ "$external_tested" = "Y" ]; then
+    echo "  [OK] External test done"
 else
-    echo "  [INFO] Troubleshooting:"
-    echo "    1. Cloud firewall: ports 80+443 open?"
-    echo "    2. Backend: Is the service running?"
-    echo "    3. Backend: AllowedIPs extended to 0.0.0.0/0?"
-    echo "    4. Backend: policy routing configured?"
-    echo "    5. Log: cat $LOG_FILE"
+    echo "  [INFO] External test hint:"
+    echo "    curl -kv https://$INGRESS_PUBLIC_IP"
 fi
 
 # --- TEST 7: tcpdump ---
@@ -989,38 +1004,6 @@ echo "   - nft list ruleset"
 echo "   - nft list table ip nat"
 echo "   - ip route show"
 echo "   - cat $LOG_FILE"
-echo ""
-
-# ====================================================================================
-# STEP 13: BACKEND COMPANION CONFIGURATION
-# ====================================================================================
-print_section "13" "BACKEND COMPANION CONFIGURATION"
-
-INGRESS_NB_IP=$(ip addr show wt0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 || true)
-INGRESS_TS_IP=$(ip addr show tailscale0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 || true)
-
-echo ""
-echo "=========================================="
-echo "  BACKEND SETUP REQUIRED"
-echo "=========================================="
-echo ""
-echo "The ingress is ready. The backend server also needs"
-echo "configuration for transparent DNAT to work."
-echo ""
-echo "Run the companion script on the backend (auto-discovery):"
-echo ""
-echo "  wget -O /root/backend.sh <URL> && bash /root/backend.sh"
-echo ""
-echo "The backend script automatically:"
-echo "  - Discovers all ingress servers by hostname ('ingress' in name)"
-echo "  - Extends AllowedIPs on both Netbird and Tailscale"
-echo "  - Sets up policy routing for each ingress"
-echo "  - Opens firewall on VPN interfaces for ports 80/443"
-echo "  - Creates timers to re-discover and re-apply every 5 minutes"
-echo ""
-echo "No manual IP input needed on the backend side."
-
-echo "=========================================="
 echo ""
 
 # ====================================================================================

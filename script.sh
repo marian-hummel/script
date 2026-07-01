@@ -704,7 +704,6 @@ table ip nat {
         type nat hook postrouting priority srcnat; policy accept;
 
         oifname WANIF ip saddr 100.64.0.0/10 snat to INGRESSIP
-        oifname WANIF ip saddr 100.100.0.0/8 snat to INGRESSIP
     }
 }
 NFTEOF
@@ -835,7 +834,6 @@ nft add rule ip nat prerouting tcp dport 80 dnat to $BACKEND_IP || log "WARN" "D
 nft add rule ip nat prerouting tcp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule tcp/443 failed"
 nft add rule ip nat prerouting udp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule udp/443 failed"
 nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP || log "WARN" "SNAT rule 100.64.0.0/10 failed"
-nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to $INGRESS_PUBLIC_IP || log "WARN" "SNAT rule 100.100.0.0/8 failed"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1044,10 +1042,9 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
     check E05 "DNAT UDP 443 present (QUIC)"                  "echo '$NAT_PRE' | grep -q 'udp dport 443.*dnat'"
     check E06 "DNAT target is $BACKEND_IP"                   "echo '$NAT_PRE' | grep 'dnat to' | grep -q '$BACKEND_IP'"
     check E07 "SNAT for 100.64.0.0/10 present"              "echo '$NAT_POST' | grep -q '100.64.0.0/10.*snat'"
-    check E08 "SNAT for 100.100.0.0/8 present"              "echo '$NAT_POST' | grep -q '100.100.0.0/8.*snat'"
-    check E09 "SNAT target is $INGRESS_PUBLIC_IP"            "echo '$NAT_POST' | grep 'snat to' | grep -q '$INGRESS_PUBLIC_IP'"
-    check E10 "DNAT count = 3 (TCP 80, TCP 443, UDP 443)"   "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 3 ]"
-    check E11 "SNAT count = 2 (Netbird+TS)"                  "[ \$(echo '$NAT_POST' | grep -c 'snat to') -eq 2 ]"
+    check E08 "SNAT target is $INGRESS_PUBLIC_IP"            "echo '$NAT_POST' | grep 'snat to' | grep -q '$INGRESS_PUBLIC_IP'"
+    check E09 "DNAT count = 3 (TCP 80, TCP 443, UDP 443)"   "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 3 ]"
+    check E10 "SNAT count = 1 (100.64.0.0/10)"              "[ \$(echo '$NAT_POST' | grep -c 'snat to') -eq 1 ]"
     DNAT_TARGETS=$(echo "$NAT_PRE" | grep 'dnat to' | sed 's/.*dnat to //' | sort -u | tr '\n' ' ')
 else
     echo "  [SKIP] E01-E11: nftables not running, cannot check NAT"
@@ -1274,19 +1271,12 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
         echo "             Expected: $BACKEND_IP"
         echo "             Fix: flush and re-add DNAT rules with correct target"
     fi
-    if [ "${T_E07:-FAIL}" = "FAIL" ] && [ "${T_E08:-FAIL}" = "FAIL" ]; then
+    if [ "${T_E07:-FAIL}" = "FAIL" ]; then
         issue "CRITICAL" "NAT postrouting: no SNAT — client drops return packets (wrong source IP)"
         echo "             → Backend response src=100.x.x.x arrives at client, client expects src=$INGRESS_PUBLIC_IP"
         echo "             Fix: nft add rule ip nat postrouting oifname $WAN_IF ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP"
-        echo "                  nft add rule ip nat postrouting oifname $WAN_IF ip saddr 100.100.0.0/8 snat to $INGRESS_PUBLIC_IP"
-    elif [ "${T_E07:-FAIL}" = "FAIL" ]; then
-        issue "WARN" "NAT postrouting: SNAT for Netbird (100.64.0.0/10) missing"
-        echo "             Fix: nft add rule ip nat postrouting oifname $WAN_IF ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP"
-    elif [ "${T_E08:-FAIL}" = "FAIL" ]; then
-        issue "WARN" "NAT postrouting: SNAT for Tailscale (100.100.0.0/8) missing"
-        echo "             Fix: nft add rule ip nat postrouting oifname $WAN_IF ip saddr 100.100.0.0/8 snat to $INGRESS_PUBLIC_IP"
     fi
-    if [ "${T_E09:-FAIL}" = "FAIL" ]; then
+    if [ "${T_E08:-FAIL}" = "FAIL" ]; then
         issue "CRITICAL" "NAT SNAT target is wrong — return packets have wrong source IP"
         echo "             Expected: $INGRESS_PUBLIC_IP"
     fi

@@ -547,6 +547,8 @@ echo 'lines.append("        ct state established,related accept")' >> /root/nft_
 echo 'lines.append("        iif lo accept")' >> /root/nft_gen.py
 echo 'lines.append("        # ICMP (for ping, path-mtu discovery, traceroute)")' >> /root/nft_gen.py
 echo 'lines.append("        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept")' >> /root/nft_gen.py
+echo 'lines.append("        icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept")' >> /root/nft_gen.py
+echo 'lines.append("        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept")' >> /root/nft_gen.py
 echo 'lines.append("        # From outside: only HTTP/HTTPS/QUIC")' >> /root/nft_gen.py
 echo 'lines.append(f"        iifname {WAN_IF} tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
 echo 'lines.append(f"        iifname {WAN_IF} udp dport 443 ct state new accept")' >> /root/nft_gen.py
@@ -565,6 +567,15 @@ echo 'lines.append(f"        iif {WAN_IF} oif wt0 tcp dport {{ 80, 443 }} ct sta
 echo 'lines.append(f"        iif {WAN_IF} oif wt0 udp dport 443 ct state new accept")' >> /root/nft_gen.py
 echo 'lines.append(f"        iif {WAN_IF} oif tailscale0 tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
 echo 'lines.append(f"        iif {WAN_IF} oif tailscale0 udp dport 443 ct state new accept")' >> /root/nft_gen.py
+echo 'lines.append("    }")' >> /root/nft_gen.py
+echo 'lines.append("}")' >> /root/nft_gen.py
+echo 'lines.append("")' >> /root/nft_gen.py
+echo '# ---- NAT TABLE (static part: SNAT return path, DNAT updated at runtime) ----' >> /root/nft_gen.py
+echo 'lines.append("table ip nat {")' >> /root/nft_gen.py
+echo 'lines.append("    chain postrouting {")' >> /root/nft_gen.py
+echo 'lines.append("        type nat hook postrouting priority srcnat; policy accept;")' >> /root/nft_gen.py
+echo 'lines.append(f"        oifname {WAN_IF} ip saddr 100.64.0.0/10 snat to {INGRESS_PUBLIC_IP}")' >> /root/nft_gen.py
+echo 'lines.append(f"        oifname {WAN_IF} ip saddr 100.100.0.0/8 snat to {INGRESS_PUBLIC_IP}")' >> /root/nft_gen.py
 echo 'lines.append("    }")' >> /root/nft_gen.py
 echo 'lines.append("}")' >> /root/nft_gen.py
 
@@ -594,9 +605,12 @@ log "OK" "nftables firewall active"
 echo "[*] Setting up NAT table with current backend IP..."
 nft add table ip nat 2>/dev/null || true
 nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
 nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
 nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
-log "OK" "NAT table configured (target: $BACKEND_IP)"
+nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
+nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP"
+log "OK" "NAT table configured (target: $BACKEND_IP, snat to $INGRESS_PUBLIC_IP)"
 
 echo ""
 echo "[OK] nftables active:"
@@ -674,12 +688,21 @@ if [ -z "$BACKEND_IP" ]; then
     exit 1
 fi
 
-# Update nftables NAT table
+# Detect WAN interface + public IP for SNAT return path
+WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
+INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
+
+# Update nftables NAT table (DNAT + SNAT for return path)
 nft flush table ip nat 2>/dev/null || true
 nft add table ip nat 2>/dev/null || true
 nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
 nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
 nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
+if [ -n "$WAN_IF" ] && [ -n "$INGRESS_PUBLIC_IP" ]; then
+    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
+    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP"
+fi
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1024,7 +1047,5 @@ echo "[INFO] nftables:       $(systemctl is-active nftables)"
 echo "[INFO] Failover timer: $(systemctl is-active update-ingress-dnat.timer)"
 echo "[INFO] Log File:       $LOG_FILE"
 echo "=========================================="
-echo ""
-echo "Next: Configure the backend server (see Step 13 above)."
 echo ""
 log "INFO" "Setup completed successfully"

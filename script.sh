@@ -641,74 +641,98 @@ log "OK" "Kernel parameters persistent"
 # ====================================================================================
 print_section "9" "NFTABLES CONFIGURATION"
 
-echo "[*] Applying nftables rules directly..."
+echo "[*] Generating nftables rules..."
 
-# Write config for persistence (re-applied on boot by systemd service)
-cat > /etc/nftables.conf << NFTEOF
+# Write all rules to a temp file, then load with nft -f (avoids all bash escaping issues)
+NFT_TMP="/tmp/ingress-nft-rules.nft"
+cat > "$NFT_TMP" << NFTEOF
 #!/usr/sbin/nft -f
 flush ruleset
+
+# ===================================================================
+# FILTER TABLE (inet = IPv4 + IPv6)
+# ===================================================================
+table inet filter {
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        iif lo accept
+
+        # ICMP
+        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
+        icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
+
+        # WAN: HTTP/HTTPS/QUIC (IPv4 only)
+        meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
+
+        # WAN: drop IPv6 on these ports
+        meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
+
+        # VPN interfaces: full trust
+        iifname wt0 accept
+        iifname tailscale0 accept
+
+        # Anti-spoofing
+        ip saddr 100.64.0.0/10 iifname != wt0 drop
+        ip saddr 100.100.0.0/8 iifname != tailscale0 drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state established,related accept
+
+        # WAN -> VPN (IPv4 only)
+        meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
+
+        # Drop IPv6 forwarding on these ports
+        meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
+        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
+    }
+}
+
+# ===================================================================
+# NAT TABLE (ip = IPv4 only)
+# ===================================================================
+table ip nat {
+
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        tcp dport { 80, 443 } dnat to ${BACKEND_IP}
+        udp dport 443 dnat to ${BACKEND_IP}
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        oifname ${WAN_IF} ip saddr 100.64.0.0/10 snat to ${INGRESS_PUBLIC_IP}
+        oifname ${WAN_IF} ip saddr 100.100.0.0/8 snat to ${INGRESS_PUBLIC_IP}
+    }
+}
 NFTEOF
-log "OK" "nftables.conf written (empty — rules applied at runtime)"
 
-# ---- FILTER TABLE (inet = IPv4 + IPv6) ----
-nft add table inet filter
-nft 'add chain inet filter input { type filter hook input priority filter; policy drop; }'
-nft 'add chain inet filter forward { type filter hook forward priority filter; policy drop; }'
+echo "[*] Validating nftables syntax..."
+nft -c -f "$NFT_TMP" || handle_error 1 "nftables syntax invalid" "CRITICAL"
+log "OK" "Syntax validated"
 
-# INPUT: return traffic + loopback
-nft add rule inet filter input ct state established,related accept
-nft add rule inet filter input iif lo accept
+echo "[*] Activating nftables firewall..."
+nft -f "$NFT_TMP" || handle_error 1 "nftables activation failed" "CRITICAL"
+log "OK" "nftables firewall active"
 
-# INPUT: ICMP
-nft add rule inet filter input icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
-nft add rule inet filter input icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
-
-# INPUT: IPv6 NDP
-nft add rule inet filter input icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
-
-# INPUT: WAN ports (IPv4 only)
-nft add rule inet filter input meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
-nft add rule inet filter input meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
-
-# INPUT: drop IPv6 on WAN for these ports
-nft add rule inet filter input meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
-nft add rule inet filter input meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
-
-# INPUT: VPN interfaces fully trusted
-nft add rule inet filter input iifname wt0 accept
-nft add rule inet filter input iifname tailscale0 accept
-
-# INPUT: anti-spoofing
-nft add rule inet filter input ip saddr 100.64.0.0/10 iifname != wt0 drop
-nft add rule inet filter input ip saddr 100.100.0.0/8 iifname != tailscale0 drop
-
-# FORWARD: return traffic
-nft add rule inet filter forward ct state established,related accept
-
-# FORWARD: WAN -> VPN (IPv4 only)
-nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
-nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
-nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
-nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
-
-# FORWARD: drop IPv6 on these ports
-nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
-nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
-nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
-nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
-
-log "OK" "Filter table applied (INPUT + FORWARD)"
-
-# ---- NAT TABLE (ip = IPv4 only) ----
-echo "[*] Setting up NAT table..."
-nft add table ip nat 2>/dev/null || true
-nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
-nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
-nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
-nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP"
-log "OK" "NAT table configured (target: $BACKEND_IP, snat to $INGRESS_PUBLIC_IP)"
+# Persist for reboots (nftables.service loads this on boot)
+cp "$NFT_TMP" /etc/nftables.conf
+rm -f "$NFT_TMP"
 
 echo ""
 echo "[OK] nftables active:"
@@ -810,16 +834,32 @@ WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
 # Update nftables NAT table (DNAT + SNAT for return path)
-nft flush table ip nat 2>/dev/null || true
-nft add table ip nat 2>/dev/null || true
-nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
-nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
+NFT_NAT="/tmp/ingress-nat.nft"
+cat > "$NFT_NAT" << NATEOF
+#!/usr/sbin/nft -f
+flush table ip nat
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        tcp dport { 80, 443 } dnat to ${BACKEND_IP}
+        udp dport 443 dnat to ${BACKEND_IP}
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+NATEOF
 if [ -n "$WAN_IF" ] && [ -n "$INGRESS_PUBLIC_IP" ]; then
-    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
-    nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP"
+    cat >> "$NFT_NAT" << SNATEOF
+        oifname ${WAN_IF} ip saddr 100.64.0.0/10 snat to ${INGRESS_PUBLIC_IP}
+        oifname ${WAN_IF} ip saddr 100.100.0.0/8 snat to ${INGRESS_PUBLIC_IP}
+SNATEOF
 fi
+cat >> "$NFT_NAT" << 'CLOSETABLE'
+    }
+}
+CLOSETABLE
+nft -f "$NFT_NAT" 2>/dev/null || true
+rm -f "$NFT_NAT"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"

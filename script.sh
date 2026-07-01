@@ -828,7 +828,7 @@ INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{pr
 # replace placeholders via sed, then load with nft -f
 NFT_NAT="/tmp/ingress-nat.nft"
 cat > "$NFT_NAT" << 'NATEOF'
-flush table ip nat
+delete table ip nat
 
 table ip nat {
     chain prerouting {
@@ -1114,25 +1114,33 @@ fi
 # ==== H. BACKEND REACHABILITY ====
 echo ""
 echo "--- H: Backend Reachability ---"
+# Layer 1: ICMP ping (basic network connectivity via VPN)
 if [ -n "${BACKEND_NB_IP:-}" ]; then
-    check H01 "Backend via Netbird :81 ($BACKEND_NB_IP)"    "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_NB_IP:81' > /dev/null 2>&1"
-    check H02 "Backend via Netbird :443 ($BACKEND_NB_IP)"   "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_NB_IP:443' > /dev/null 2>&1"
+    check H01 "Ping backend via Netbird ($BACKEND_NB_IP)"       "ping -c 1 -W 3 '$BACKEND_NB_IP' > /dev/null 2>&1"
 fi
 if [ -n "${BACKEND_TS_IP:-}" ]; then
-    check H03 "Backend via Tailscale :81 ($BACKEND_TS_IP)"  "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_TS_IP:81' > /dev/null 2>&1"
-    check H04 "Backend via Tailscale :443 ($BACKEND_TS_IP)" "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_TS_IP:443' > /dev/null 2>&1"
+    check H02 "Ping backend via Tailscale ($BACKEND_TS_IP)"     "ping -c 1 -W 3 '$BACKEND_TS_IP' > /dev/null 2>&1"
 fi
-check H05 "Active DNAT target reachable :81 ($BACKEND_IP)"  "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_IP:81' > /dev/null 2>&1"
-check H06 "Active DNAT target reachable :443 ($BACKEND_IP)" "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_IP:443' > /dev/null 2>&1"
-# Redundancy: both paths working?
+# Layer 2: HTTPS curl (application connectivity — backend must answer on port 81/443)
+if [ -n "${BACKEND_NB_IP:-}" ]; then
+    check H03 "Curl HTTPS backend via Netbird :81 ($BACKEND_NB_IP)"   "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_NB_IP:81' > /dev/null 2>&1"
+    check H04 "Curl HTTPS backend via Netbird :443 ($BACKEND_NB_IP)"  "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_NB_IP:443' > /dev/null 2>&1"
+fi
+if [ -n "${BACKEND_TS_IP:-}" ]; then
+    check H05 "Curl HTTPS backend via Tailscale :81 ($BACKEND_TS_IP)"  "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_TS_IP:81' > /dev/null 2>&1"
+    check H06 "Curl HTTPS backend via Tailscale :443 ($BACKEND_TS_IP)" "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_TS_IP:443' > /dev/null 2>&1"
+fi
+check H07 "Active DNAT target HTTPS :81 ($BACKEND_IP)"          "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_IP:81' > /dev/null 2>&1"
+check H08 "Active DNAT target HTTPS :443 ($BACKEND_IP)"         "curl -k -s --connect-timeout 3 --max-time 5 'https://$BACKEND_IP:443' > /dev/null 2>&1"
+# Redundancy: both paths working (curl HTTPS is the real test)
 if [ -n "${BACKEND_NB_IP:-}" ] && [ -n "${BACKEND_TS_IP:-}" ]; then
     NB_OK=false; TS_OK=false
-    [ "${T_H01:-FAIL}" = "PASS" ] && NB_OK=true
-    [ "${T_H03:-FAIL}" = "PASS" ] && TS_OK=true
+    [ "${T_H03:-FAIL}" = "PASS" ] && NB_OK=true
+    [ "${T_H05:-FAIL}" = "PASS" ] && TS_OK=true
     if $NB_OK && $TS_OK; then
-        check H07 "Both VPN paths reachable (redundancy)"   "true"
+        check H09 "Both VPN paths reachable (redundancy)"       "true"
     else
-        check H07 "Both VPN paths reachable (redundancy)"   "false"
+        check H09 "Both VPN paths reachable (redundancy)"   "false"
     fi
 fi
 
@@ -1354,8 +1362,8 @@ fi
 
 # ── 8. Backend reachability ────────────────────────────────────────────────────
 REACH_VIA_NB=false; REACH_VIA_TS=false
-[ "${T_H01:-FAIL}" = "PASS" ] && REACH_VIA_NB=true
-[ "${T_H03:-FAIL}" = "PASS" ] && REACH_VIA_TS=true
+[ "${T_H03:-FAIL}" = "PASS" ] && REACH_VIA_NB=true
+[ "${T_H05:-FAIL}" = "PASS" ] && REACH_VIA_TS=true
 
 if ! $REACH_VIA_NB && ! $REACH_VIA_TS; then
     issue "CRITICAL" "Backend not reachable via ANY VPN — DNAT has no working target"
@@ -1376,7 +1384,7 @@ elif ! $REACH_VIA_NB && $REACH_VIA_TS; then
     fi
     echo "             DNAT currently uses Tailscale IP: $BACKEND_TS_IP"
 fi
-if [ "${T_H07:-FAIL}" = "FAIL" ] && [ -n "${BACKEND_NB_IP:-}" ] && [ -n "${BACKEND_TS_IP:-}" ]; then
+if [ "${T_H09:-FAIL}" = "FAIL" ] && [ -n "${BACKEND_NB_IP:-}" ] && [ -n "${BACKEND_TS_IP:-}" ]; then
     issue "WARN" "Both VPN paths should be reachable for redundancy"
 fi
 
@@ -1403,14 +1411,14 @@ if [ "${T_K02:-FAIL}" = "FAIL" ]; then
 fi
 
 # ── 11. End-to-end ────────────────────────────────────────────────────────────
-if [ "${T_J01:-FAIL}" = "FAIL" ] && [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H05:-FAIL}" = "PASS" ]; then
+if [ "${T_J01:-FAIL}" = "FAIL" ] && [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
     issue "WARN" "Local loopback test failed despite DNAT+backend being OK"
     echo "             → Possible cloud firewall blocking loopback to public IP"
 fi
 
 # ── 12. Cloud firewall ────────────────────────────────────────────────────────
 if [ "${T_L01:-FAIL}" = "FAIL" ]; then
-    if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H05:-FAIL}" = "PASS" ]; then
+    if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
         issue "CRITICAL" "External access to $INGRESS_PUBLIC_IP:443 failed from inside"
         echo "             → All internal checks pass but external loopback fails"
         echo "             Most likely cause: Netcup cloud firewall not open"
@@ -1419,7 +1427,7 @@ if [ "${T_L01:-FAIL}" = "FAIL" ]; then
 fi
 
 # ── 13. Traffic path summary ──────────────────────────────────────────────────
-if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H05:-FAIL}" = "PASS" ]; then
+if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
     issue "INFO" "Traffic path:"
     echo "             Client → $INGRESS_PUBLIC_IP:443"
     if [ -n "${DNAT_TARGETS:-}" ]; then echo "             DNAT → $DNAT_TARGETS"; fi

@@ -652,8 +652,8 @@ log "OK" "nftables.conf written (empty — rules applied at runtime)"
 
 # ---- FILTER TABLE (inet = IPv4 + IPv6) ----
 nft add table inet filter
-nft add chain inet input '{ type filter hook input priority filter; policy drop; }'
-nft add chain inet forward '{ type filter hook forward priority filter; policy drop; }'
+nft 'add chain inet filter input { type filter hook input priority filter; policy drop; }'
+nft 'add chain inet filter forward { type filter hook forward priority filter; policy drop; }'
 
 # INPUT: return traffic + loopback
 nft add rule inet input ct state established,related accept
@@ -702,8 +702,8 @@ log "OK" "Filter table applied (INPUT + FORWARD)"
 # ---- NAT TABLE (ip = IPv4 only) ----
 echo "[*] Setting up NAT table..."
 nft add table ip nat 2>/dev/null || true
-nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
 nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
 nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
 nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
@@ -812,8 +812,8 @@ INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{pr
 # Update nftables NAT table (DNAT + SNAT for return path)
 nft flush table ip nat 2>/dev/null || true
 nft add table ip nat 2>/dev/null || true
-nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
 nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
 nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
 if [ -n "$WAN_IF" ] && [ -n "$INGRESS_PUBLIC_IP" ]; then

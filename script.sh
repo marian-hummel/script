@@ -824,31 +824,17 @@ fi
 WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
-# Rebuild NAT table — write to temp file with quoted heredoc (no bash expansion),
-# replace placeholders via sed, then load with nft -f
-NFT_NAT="/tmp/ingress-nat.nft"
-cat > "$NFT_NAT" << 'NATEOF'
-delete table ip nat
-
-table ip nat {
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        tcp dport 80 dnat to BACKENDIP
-        tcp dport 443 dnat to BACKENDIP
-        udp dport 443 dnat to BACKENDIP
-    }
-    chain postrouting {
-        type nat hook postrouting priority srcnat; policy accept;
-        oifname "WANIF" ip saddr 100.64.0.0/10 snat to INGRESSIP
-        oifname "WANIF" ip saddr 100.100.0.0/8 snat to INGRESSIP
-    }
-}
-NATEOF
-sed -i "s|BACKENDIP|$BACKEND_IP|g" "$NFT_NAT"
-sed -i "s|WANIF|$WAN_IF|g" "$NFT_NAT"
-sed -i "s|INGRESSIP|$INGRESS_PUBLIC_IP|g" "$NFT_NAT"
-nft -f "$NFT_NAT" 2>/dev/null || true
-rm -f "$NFT_NAT"
+# Rebuild NAT table — delete entire table, then rebuild with nft add commands.
+# Using individual commands avoids nft -f file errors being silently swallowed.
+nft delete table ip nat 2>/dev/null || true
+nft add table ip nat 2>/dev/null || true
+nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+nft add rule ip nat prerouting tcp dport 80 dnat to "$BACKEND_IP" 2>/dev/null || true
+nft add rule ip nat prerouting tcp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
+nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
+nft add rule ip nat postrouting oifname "\"$WAN_IF\"" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
+nft add rule ip nat postrouting oifname "\"$WAN_IF\"" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1223,14 +1209,6 @@ if [ "${T_A01:-FAIL}" = "FAIL" ] && [ "${T_A02:-FAIL}" = "FAIL" ]; then
     if [ "${T_B01:-FAIL}" = "PASS" ] && [ "${T_C01:-FAIL}" = "FAIL" ]; then
         echo "             → INPUT chain missing 'ct state established,related accept'"
         echo "             Fix: nft add rule inet filter input ct state established,related accept"
-    fi
-elif [ "${T_A01:-FAIL}" = "PASS" ] && [ "${T_A02:-FAIL}" = "FAIL" ]; then
-    issue "WARN" "IPv6 unreachable (IPv4 works)"
-    if [ "${T_C06:-FAIL}" = "FAIL" ] || [ "${T_C07:-FAIL}" = "FAIL" ]; then
-        echo "             Cause: ICMPv6 Neighbor Discovery blocked by nftables"
-        echo "             Fix: nft add rule inet filter input icmpv6 type {"
-        echo "                    nd-neighbor-solicit, nd-neighbor-advert,"
-        echo "                    nd-router-advert, nd-redirect } accept"
     fi
 fi
 

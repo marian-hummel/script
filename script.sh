@@ -641,164 +641,70 @@ log "OK" "Kernel parameters persistent"
 # ====================================================================================
 print_section "9" "NFTABLES CONFIGURATION"
 
-echo "[*] Generating filter rules via Python..."
-log "INFO" "Creating /root/nft_gen.py"
+echo "[*] Writing /etc/nftables.conf..."
 
-cat /dev/null > /root/nft_gen.py
-echo '#!/usr/bin/env python3' >> /root/nft_gen.py
-echo 'import os, sys' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo 'WAN_IF = os.environ.get("WAN_IF", "").strip()' >> /root/nft_gen.py
-echo 'INGRESS_PUBLIC_IP = os.environ.get("INGRESS_PUBLIC_IP", "").strip()' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo 'if not WAN_IF or not INGRESS_PUBLIC_IP:' >> /root/nft_gen.py
-echo '    print("[ERROR] Missing WAN_IF or INGRESS_PUBLIC_IP")' >> /root/nft_gen.py
-echo '    sys.exit(1)' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo 'lines = []' >> /root/nft_gen.py
-echo 'lines.append("#!/usr/sbin/nft -f")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo 'lines.append("flush ruleset")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo '# FILTER TABLE (inet = IPv4 + IPv6 combined)' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo '# The inet family lets us write one set of rules that applies to both' >> /root/nft_gen.py
-echo '# IPv4 and IPv6 packets, avoiding duplication.' >> /root/nft_gen.py
-echo '# Default policy on both INPUT and FORWARD is "drop" — everything that' >> /root/nft_gen.py
-echo '# is not explicitly allowed is silently discarded.' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo 'lines.append("table inet filter {")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# ---- INPUT CHAIN ----' >> /root/nft_gen.py
-echo '# Hook: input (packets addressed to the host itself)' >> /root/nft_gen.py
-echo '# Priority: filter (default for firewall rules)' >> /root/nft_gen.py
-echo '# Policy: drop — reject all inbound traffic unless a rule explicitly allows it' >> /root/nft_gen.py
-echo 'lines.append("    chain input {")' >> /root/nft_gen.py
-echo 'lines.append("        type filter hook input priority filter; policy drop;")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# Allow return traffic for connections we initiated or that are being DNATed.' >> /root/nft_gen.py
-echo '# Without this, the firewall would block its own DNS queries, apt updates,' >> /root/nft_gen.py
-echo '# and the backend response packets coming back from the VPN.' >> /root/nft_gen.py
-echo 'lines.append("        ct state established,related accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# Loopback is fully trusted — allows local processes to communicate.' >> /root/nft_gen.py
-echo 'lines.append("        iif lo accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# ICMP is essential for network diagnostics and correct operation:' >> /root/nft_gen.py
-echo '#   echo-request/reply   — ping (troubleshooting)' >> /root/nft_gen.py
-echo '#   destination-unreachable — path MTU discovery (without this, large packets' >> /root/nft_gen.py
-echo '#                            get silently dropped and connections hang)' >> /root/nft_gen.py
-echo '#   time-exceeded       — traceroute' >> /root/nft_gen.py
-echo '#   packet-too-big      — IPv6 path MTU discovery (critical for IPv6)' >> /root/nft_gen.py
-echo '#   parameter-problem   — IPv6 header issue notification' >> /root/nft_gen.py
-echo 'lines.append("        # ICMP (for ping, path-mtu discovery, traceroute)")' >> /root/nft_gen.py
-echo 'lines.append("        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept")' >> /root/nft_gen.py
-echo 'lines.append("        icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# IPv6 Neighbor Discovery Protocol (NDP) — the IPv6 equivalent of ARP.' >> /root/nft_gen.py
-echo '# Without these ICMPv6 types, IPv6 neighbors cannot be discovered and' >> /root/nft_gen.py
-echo '# the host becomes unreachable over IPv6 ("No route to host").' >> /root/nft_gen.py
-echo '#   nd-neighbor-solicit  — "who has this IP?" (like ARP request)' >> /root/nft_gen.py
-echo '#   nd-neighbor-advert   — "I have this IP" (like ARP reply)' >> /root/nft_gen.py
-echo '#   nd-router-advert     — router advertisement (RA) from upstream router' >> /root/nft_gen.py
-echo '#   nd-redirect          — better next-hop notification' >> /root/nft_gen.py
-echo 'lines.append("        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# Only HTTP (80), HTTPS (443), and QUIC/HTTP3 (UDP 443) are allowed from' >> /root/nft_gen.py
-echo '# the internet. All other ports are blocked by the default drop policy.' >> /root/nft_gen.py
-echo '# This includes SSH — management must happen via the VPN.' >> /root/nft_gen.py
-echo '# Decision: IPv4 only for backend access. IPv6 on these ports is explicitly' >> /root/nft_gen.py
-echo '# dropped because the NAT table (table ip nat) only supports IPv4, so DNAT' >> /root/nft_gen.py
-echo '# does not work for IPv6. Allowing IPv6 without DNAT would either reject the' >> /root/nft_gen.py
-echo '# connection (no local listener) or let traffic bypass the backend entirely.' >> /root/nft_gen.py
-echo 'lines.append("        # From outside: only HTTP/HTTPS/QUIC (IPv4 only)")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iifname {WAN_IF} tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iifname {WAN_IF} udp dport 443 ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iifname {WAN_IF} tcp dport {{ 80, 443 }} drop")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iifname {WAN_IF} udp dport 443 drop")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# VPN tunnel interfaces are fully trusted — all traffic from them is allowed.' >> /root/nft_gen.py
-echo '# This includes SSH, monitoring, and any other management traffic from the VPN.' >> /root/nft_gen.py
-echo 'lines.append("        # VPN interfaces: full trust")' >> /root/nft_gen.py
-echo 'lines.append("        iifname wt0 accept")' >> /root/nft_gen.py
-echo 'lines.append("        iifname tailscale0 accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# Anti-spoofing: VPN address ranges must only be accepted on their respective' >> /root/nft_gen.py
-echo '# interfaces. If a packet claiming to be from 100.64.0.0/10 arrives on the WAN' >> /root/nft_gen.py
-echo '# or on tailscale0, it is spoofed and gets dropped.' >> /root/nft_gen.py
-echo '#   Netbird:   100.64.0.0/10  (CGNAT range)' >> /root/nft_gen.py
-echo '#   Tailscale: 100.100.0.0/8 (Tailscale-specific CGNAT subset)' >> /root/nft_gen.py
-echo 'lines.append("        # Anti-spoofing: VPN source IPs only valid on VPN interfaces")' >> /root/nft_gen.py
-echo 'lines.append("        ip saddr 100.64.0.0/10 iifname != wt0 drop")' >> /root/nft_gen.py
-echo 'lines.append("        ip saddr 100.100.0.0/8 iifname != tailscale0 drop")' >> /root/nft_gen.py
-echo 'lines.append("    }")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# ---- FORWARD CHAIN ----' >> /root/nft_gen.py
-echo '# Hook: forward (packets that pass through the host, not addressed to it)' >> /root/nft_gen.py
-echo '# Policy: drop — only explicitly permitted traffic may be forwarded' >> /root/nft_gen.py
-echo 'lines.append("    chain forward {")' >> /root/nft_gen.py
-echo 'lines.append("        type filter hook forward priority filter; policy drop;")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# As with INPUT, allow return traffic for established connections.' >> /root/nft_gen.py
-echo '# Without this, DNAT return packets from the backend would be dropped here.' >> /root/nft_gen.py
-echo 'lines.append("        ct state established,related accept")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# Allow new inbound connections from WAN into either VPN tunnel, but ONLY' >> /root/nft_gen.py
-echo '# for TCP 80/443 and UDP 443. This restricts the ingress to HTTP/S traffic' >> /root/nft_gen.py
-echo '# and prevents forwarding of arbitrary protocols (SSH, SMTP, etc.).' >> /root/nft_gen.py
-echo '# IPv4 only — see INPUT chain for rationale.' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iif {WAN_IF} oif wt0 tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iif {WAN_IF} oif wt0 udp dport 443 ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iif {WAN_IF} oif tailscale0 tcp dport {{ 80, 443 }} ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv4 iif {WAN_IF} oif tailscale0 udp dport 443 ct state new accept")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iif {WAN_IF} oif wt0 tcp dport {{ 80, 443 }} drop")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iif {WAN_IF} oif wt0 udp dport 443 drop")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iif {WAN_IF} oif tailscale0 tcp dport {{ 80, 443 }} drop")' >> /root/nft_gen.py
-echo 'lines.append(f"        meta nfproto ipv6 iif {WAN_IF} oif tailscale0 udp dport 443 drop")' >> /root/nft_gen.py
-echo 'lines.append("    }")' >> /root/nft_gen.py
-echo 'lines.append("}")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo '# NAT TABLE (ip family, IPv4 only)' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo '# Only the SNAT (postrouting) rules are defined here. The DNAT (prerouting)' >> /root/nft_gen.py
-echo '# rules are added at runtime by the setup script (and later by the failover' >> /root/nft_gen.py
-echo '# timer) so they can be updated dynamically without rewriting this file.' >> /root/nft_gen.py
-echo '# ===================================================================' >> /root/nft_gen.py
-echo 'lines.append("table ip nat {")' >> /root/nft_gen.py
-echo 'lines.append("")' >> /root/nft_gen.py
-echo 'lines.append("    chain postrouting {")' >> /root/nft_gen.py
-echo 'lines.append("        type nat hook postrouting priority srcnat; policy accept;")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo '# SNAT (Source NAT) for the return path:' >> /root/nft_gen.py
-echo '# When the backend sends a response back to the client, its source IP is' >> /root/nft_gen.py
-echo '# the VPN IP (100.x.x.x). The client would see a packet from 100.x.x.x when' >> /root/nft_gen.py
-echo '# it expected one from $INGRESS_PUBLIC_IP, and would drop it.' >> /root/nft_gen.py
-echo '# These rules rewrite the source address to $INGRESS_PUBLIC_IP for any packet' >> /root/nft_gen.py
-echo '# leaving via WAN_IF that has a VPN source address.' >> /root/nft_gen.py
-echo '# This is "transparent" DNAT — the client never knows the backend exists.' >> /root/nft_gen.py
-echo 'lines.append(f"        oifname {WAN_IF} ip saddr 100.64.0.0/10 snat to {INGRESS_PUBLIC_IP}")' >> /root/nft_gen.py
-echo 'lines.append(f"        oifname {WAN_IF} ip saddr 100.100.0.0/8 snat to {INGRESS_PUBLIC_IP}")' >> /root/nft_gen.py
-echo 'lines.append("    }")' >> /root/nft_gen.py
-echo 'lines.append("}")' >> /root/nft_gen.py
+cat > /etc/nftables.conf << NFTEOF
+#!/usr/sbin/nft -f
+flush ruleset
 
-echo '' >> /root/nft_gen.py
-echo 'with open("/etc/nftables.conf", "w") as f:' >> /root/nft_gen.py
-echo '    f.write("\n".join(lines) + "\n")' >> /root/nft_gen.py
-echo '' >> /root/nft_gen.py
-echo 'print(f"[OK] nftables.conf generated: {len(lines)} lines")' >> /root/nft_gen.py
+# ===================================================================
+# FILTER TABLE (inet = IPv4 + IPv6 combined)
+# ===================================================================
+table inet filter {
 
-log "OK" "Python generator written"
+    chain input {
+        type filter hook input priority filter; policy drop;
 
-echo "[*] Running Python generator..."
-export WAN_IF INGRESS_PUBLIC_IP
-python3 /root/nft_gen.py || handle_error 1 "nftables generation failed" "CRITICAL"
-rm -f /root/nft_gen.py
+        # Return traffic for existing connections
+        ct state established,related accept
+
+        # Loopback
+        iif lo accept
+
+        # ICMP (ping, path-mtu, traceroute)
+        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
+        icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
+
+        # IPv6 Neighbor Discovery (NDP)
+        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
+
+        # WAN: HTTP/HTTPS/QUIC (IPv4 only)
+        meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
+
+        # WAN: drop IPv6 on these ports (DNAT is IPv4-only)
+        meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
+
+        # VPN interfaces: full trust
+        iifname wt0 accept
+        iifname tailscale0 accept
+
+        # Anti-spoofing
+        ip saddr 100.64.0.0/10 iifname != wt0 drop
+        ip saddr 100.100.0.0/8 iifname != tailscale0 drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        # Return traffic for established connections
+        ct state established,related accept
+
+        # WAN -> VPN (IPv4 only)
+        meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
+        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
+
+        # Drop IPv6 forwarding on these ports
+        meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
+        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
+        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
+    }
+}
+NFTEOF
 
 echo "[*] Validating nftables syntax..."
 nft -c -f /etc/nftables.conf || handle_error 1 "nftables syntax invalid" "CRITICAL"
@@ -809,55 +715,8 @@ systemctl restart nftables
 systemctl is-active --quiet nftables || handle_error 1 "nftables not running" "CRITICAL"
 log "OK" "nftables firewall active"
 
-# ---- NAT Table (added via direct nft commands for dynamic updates) ----
-# The NAT table is created at runtime (not from the static file above) so that the
-# DNAT update script (/usr/local/bin/update-ingress-dnat.sh) can atomically flush
-# and rebuild it without touching /etc/nftables.conf or the filter table.
-#
-# What each command does:
-#
-#   nft add table ip nat
-#     Creates the NAT table in the ip (IPv4) family. "ip nat" distinguishes it
-#     from "inet filter". The table is a container for chains.
-#
-#   nft add chain ip nat prerouting
-#     Creates the prerouting chain with hook "prerouting" — this intercepts
-#     packets BEFORE the routing decision (i.e. before the kernel decides
-#     whether the packet is for the local host or should be forwarded).
-#     Priority "dstnat" (dst NAT) ensures DNAT runs before the filter/forward
-#     decision, so the destination address is rewritten early.
-#     Policy "accept" — packets that don't match any DNAT rule pass through.
-#
-#   nft add chain ip nat postrouting
-#     Creates the postrouting chain with hook "postrouting" — this runs AFTER
-#     the routing decision, just before the packet leaves the host.
-#     Priority "srcnat" (src NAT) ensures SNAT is the last transformation.
-#     Policy "accept" — non-VPN return packets pass through unchanged.
-#
-#   nft add rule ip nat prerouting tcp dport { 80, 443 } dnat to "$BACKEND_IP"
-#     DNAT rule for TCP: any incoming packet on port 80 or 443 has its destination
-#     IP rewritten from $INGRESS_PUBLIC_IP to $BACKEND_IP. The routing subsystem
-#     then forwards it into the VPN tunnel that leads to $BACKEND_IP.
-#     This is "transparent" because the destination port is NOT changed — the
-#     backend receives the original port (80 or 443) and the original client IP.
-#
-#   nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP"
-#     Same as above but for UDP 443, needed for QUIC/HTTP3. QUIC runs over UDP
-#     and is becoming the standard for HTTP/3. Without this rule, QUIC connections
-#     would reach the firewall but not be forwarded to the backend.
-#
-#   nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP"
-#     SNAT rule for the return path via Netbird (100.64.0.0/10 is Netbird's CGNAT range).
-#     When the backend sends a response, its source IP is in the VPN range (e.g. 100.64.x.x).
-#     If this packet arrived at the client as-is, the client would see a source IP of
-#     100.64.x.x — not $INGRESS_PUBLIC_IP — and would drop the packet (TCP RST).
-#     This rule rewrites the source to $INGRESS_PUBLIC_IP for any packet leaving via
-#     WAN_IF whose source is in the Netbird CGNAT range. The client then sees a
-#     consistent source IP and accepts the response.
-#
-#   nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP"
-#     Same SNAT logic but for Tailscale's address range (100.100.0.0/8).
-echo "[*] Setting up NAT table with current backend IP..."
+# ---- NAT Table (ip family, IPv4 only) ----
+echo "[*] Setting up NAT table..."
 nft add table ip nat 2>/dev/null || true
 nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
 nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true

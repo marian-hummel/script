@@ -824,17 +824,18 @@ fi
 WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
-# Rebuild NAT table — delete entire table, then rebuild with nft add commands.
-# Using individual commands avoids nft -f file errors being silently swallowed.
-nft delete table ip nat 2>/dev/null || true
+# Rebuild NAT table — flush existing rules, then add chains + rules.
+# Use unquoted variables so nft receives proper syntax (e.g. oifname ens6).
+# Log errors so failures are not silently swallowed.
+nft flush table ip nat 2>/dev/null || true
 nft add table ip nat 2>/dev/null || true
 nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
 nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport 80 dnat to "$BACKEND_IP" 2>/dev/null || true
-nft add rule ip nat prerouting tcp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
-nft add rule ip nat prerouting udp dport 443 dnat to "$BACKEND_IP" 2>/dev/null || true
-nft add rule ip nat postrouting oifname "\"$WAN_IF\"" ip saddr 100.64.0.0/10 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
-nft add rule ip nat postrouting oifname "\"$WAN_IF\"" ip saddr 100.100.0.0/8 snat to "$INGRESS_PUBLIC_IP" 2>/dev/null || true
+nft add rule ip nat prerouting tcp dport 80 dnat to $BACKEND_IP || log "WARN" "DNAT rule tcp/80 failed"
+nft add rule ip nat prerouting tcp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule tcp/443 failed"
+nft add rule ip nat prerouting udp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule udp/443 failed"
+nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP || log "WARN" "SNAT rule 100.64.0.0/10 failed"
+nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.100.0.0/8 snat to $INGRESS_PUBLIC_IP || log "WARN" "SNAT rule 100.100.0.0/8 failed"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"

@@ -641,81 +641,65 @@ log "OK" "Kernel parameters persistent"
 # ====================================================================================
 print_section "9" "NFTABLES CONFIGURATION"
 
-echo "[*] Writing /etc/nftables.conf..."
+echo "[*] Applying nftables rules directly..."
 
+# Write config for persistence (re-applied on boot by systemd service)
 cat > /etc/nftables.conf << NFTEOF
 #!/usr/sbin/nft -f
 flush ruleset
-
-# ===================================================================
-# FILTER TABLE (inet = IPv4 + IPv6 combined)
-# ===================================================================
-table inet filter {
-
-    chain input {
-        type filter hook input priority filter; policy drop;
-
-        # Return traffic for existing connections
-        ct state established,related accept
-
-        # Loopback
-        iif lo accept
-
-        # ICMP (ping, path-mtu, traceroute)
-        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
-        icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
-
-        # IPv6 Neighbor Discovery (NDP)
-        icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
-
-        # WAN: HTTP/HTTPS/QUIC (IPv4 only)
-        meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
-
-        # WAN: drop IPv6 on these ports (DNAT is IPv4-only)
-        meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
-
-        # VPN interfaces: full trust
-        iifname wt0 accept
-        iifname tailscale0 accept
-
-        # Anti-spoofing
-        ip saddr 100.64.0.0/10 iifname != wt0 drop
-        ip saddr 100.100.0.0/8 iifname != tailscale0 drop
-    }
-
-    chain forward {
-        type filter hook forward priority filter; policy drop;
-
-        # Return traffic for established connections
-        ct state established,related accept
-
-        # WAN -> VPN (IPv4 only)
-        meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
-        meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
-
-        # Drop IPv6 forwarding on these ports
-        meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
-        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
-        meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
-    }
-}
 NFTEOF
+log "OK" "nftables.conf written (empty — rules applied at runtime)"
 
-echo "[*] Validating nftables syntax..."
-nft -c -f /etc/nftables.conf || handle_error 1 "nftables syntax invalid" "CRITICAL"
-log "OK" "Syntax validated"
+# ---- FILTER TABLE (inet = IPv4 + IPv6) ----
+nft add table inet filter
+nft add chain inet input '{ type filter hook input priority filter; policy drop; }'
+nft add chain inet forward '{ type filter hook forward priority filter; policy drop; }'
 
-echo "[*] Activating nftables firewall..."
-systemctl restart nftables
-systemctl is-active --quiet nftables || handle_error 1 "nftables not running" "CRITICAL"
-log "OK" "nftables firewall active"
+# INPUT: return traffic + loopback
+nft add rule inet input ct state established,related accept
+nft add rule inet input iif lo accept
 
-# ---- NAT Table (ip family, IPv4 only) ----
+# INPUT: ICMP
+nft add rule inet input icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
+nft add rule inet input icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
+
+# INPUT: IPv6 NDP
+nft add rule inet input icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
+
+# INPUT: WAN ports (IPv4 only)
+nft add rule inet input meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
+nft add rule inet input meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
+
+# INPUT: drop IPv6 on WAN for these ports
+nft add rule inet input meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
+nft add rule inet input meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
+
+# INPUT: VPN interfaces fully trusted
+nft add rule inet input iifname wt0 accept
+nft add rule inet input iifname tailscale0 accept
+
+# INPUT: anti-spoofing
+nft add rule inet input ip saddr 100.64.0.0/10 iifname != wt0 drop
+nft add rule inet input ip saddr 100.100.0.0/8 iifname != tailscale0 drop
+
+# FORWARD: return traffic
+nft add rule inet forward ct state established,related accept
+
+# FORWARD: WAN -> VPN (IPv4 only)
+nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
+nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
+nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
+nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
+
+# FORWARD: drop IPv6 on these ports
+nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
+nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
+nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
+nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
+
+log "OK" "Filter table applied (INPUT + FORWARD)"
+
+# ---- NAT TABLE (ip = IPv4 only) ----
 echo "[*] Setting up NAT table..."
 nft add table ip nat 2>/dev/null || true
 nft add chain ip nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true

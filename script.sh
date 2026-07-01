@@ -75,7 +75,7 @@ echo "=========================================="
 log "INFO" "Script started - User: $(whoami), System: $(uname -n)"
 
 # DNS name of the backend server (resolved via Netbird or Tailscale DNS)
-BACKEND_ADDRESS="backend.ma.internal"
+BACKEND_ADDRESS="backend"
 # File that caches the last-known-working backend IP so we can survive a reboot
 CACHE_FILE="/etc/ingress-edge-backend-ip"
 
@@ -397,20 +397,22 @@ VPN_TYPE=""
 # ---- Step A: Discover BOTH IPs (Netbird + Tailscale) ----
 echo "[*] Discovering backend IPs on both VPNs..."
 
-# Netbird DNS: try up to 10 times because the DNS resolver may not be ready yet
-echo "[*] Resolving via Netbird DNS: $BACKEND_ADDRESS..."
-for i in $(seq 1 10); do
-    BACKEND_NB_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
+# Netbird: search `netbird status --detail` for "backend" hostname, extract IP
+echo "[*] Searching Netbird status for 'backend'..."
+if command -v netbird >/dev/null 2>&1 && ip addr show wt0 2>/dev/null | grep -q "inet "; then
+    BACKEND_NB_IP=$(netbird status --detail 2>/dev/null \
+        | grep -A4 -i "backend" \
+        | awk '/NetBird IP:/ {print $3; exit}' \
+        | cut -d'/' -f1)
     if [ -n "$BACKEND_NB_IP" ]; then
         echo "[OK] Netbird IP: $BACKEND_NB_IP"
-        break
+    else
+        echo "[INFO] No Netbird match for 'backend'"
     fi
-    echo "[INFO] Waiting for Netbird DNS... (attempt $i/10)"
-    sleep 2
-done
+fi
 
-# Tailscale magic DNS: search tailscale status output for a device named "backend"
-echo "[*] Resolving via Tailscale magic DNS..."
+# Tailscale: search `tailscale status` for "backend" hostname, extract IP
+echo "[*] Searching Tailscale status for 'backend'..."
 if command -v tailscale >/dev/null 2>&1 && ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
     BACKEND_TS_IP=$(timeout 10 tailscale status 2>/dev/null \
         | grep -i "backend" \
@@ -902,7 +904,7 @@ cat > "$UPDATE_SCRIPT" << 'DNATSCRIPT'
 # public IP changes (e.g. dynamic IP), the return path stays correct.
 # ====================================================================================
 
-BACKEND_ADDRESS="backend.ma.internal"
+BACKEND_ADDRESS="backend"
 CACHE_FILE="/etc/ingress-edge-backend-ip"
 LOG_FILE="/var/log/ingress_edge_setup.log"
 
@@ -918,12 +920,15 @@ BACKEND_TS_IP=""
 BACKEND_IP=""
 VPN_TYPE=""
 
-# 1) Discover Netbird IP
+# 1) Discover Netbird IP — search status for "backend"
 if ip addr show wt0 2>/dev/null | grep -q "inet "; then
-    BACKEND_NB_IP=$(getent hosts "$BACKEND_ADDRESS" 2>/dev/null | awk '{print $1}' | head -1)
+    BACKEND_NB_IP=$(netbird status --detail 2>/dev/null \
+        | grep -A4 -i "backend" \
+        | awk '/NetBird IP:/ {print $3; exit}' \
+        | cut -d'/' -f1)
 fi
 
-# 2) Discover Tailscale IP — search for "backend" in magic DNS
+# 2) Discover Tailscale IP — search status for "backend"
 if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
     BACKEND_TS_IP=$(timeout 10 tailscale status 2>/dev/null \
         | grep -i "backend" \

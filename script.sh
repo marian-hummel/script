@@ -70,8 +70,7 @@ echo "  Transparent DNAT - Real Client IP"
 echo "=========================================="
 log "INFO" "Script started - User: $(whoami), System: $(uname -n)"
 
-BACKEND_ADDRESS="reversed-proxy.ma.internal"
-BACKUP_ADDRESS="reversed-proxy.ma.internal"    # Alternative DNS if primary fails
+BACKEND_ADDRESS="backend.ma.internal"
 CACHE_FILE="/etc/ingress-edge-backend-ip"
 
 echo "[INFO] Backend DNS: $BACKEND_ADDRESS"
@@ -633,7 +632,7 @@ cat > "$UPDATE_SCRIPT" << 'DNATSCRIPT'
 # Logic: discover both IPs, test reachability, use the working one.
 # ====================================================================================
 
-BACKEND_ADDRESS="reversed-proxy.ma.internal"
+BACKEND_ADDRESS="backend.ma.internal"
 CACHE_FILE="/etc/ingress-edge-backend-ip"
 LOG_FILE="/var/log/ingress_edge_setup.log"
 

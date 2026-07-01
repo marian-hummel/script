@@ -656,46 +656,46 @@ nft 'add chain inet filter input { type filter hook input priority filter; polic
 nft 'add chain inet filter forward { type filter hook forward priority filter; policy drop; }'
 
 # INPUT: return traffic + loopback
-nft add rule inet input ct state established,related accept
-nft add rule inet input iif lo accept
+nft add rule inet filter input ct state established,related accept
+nft add rule inet filter input iif lo accept
 
 # INPUT: ICMP
-nft add rule inet input icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
-nft add rule inet input icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
+nft add rule inet filter input icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
+nft add rule inet filter input icmpv6 type { echo-request, echo-reply, destination-unreachable, time-exceeded, packet-too-big, parameter-problem } accept
 
 # INPUT: IPv6 NDP
-nft add rule inet input icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
+nft add rule inet filter input icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept
 
 # INPUT: WAN ports (IPv4 only)
-nft add rule inet input meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
-nft add rule inet input meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
+nft add rule inet filter input meta nfproto ipv4 iifname ${WAN_IF} tcp dport { 80, 443 } ct state new accept
+nft add rule inet filter input meta nfproto ipv4 iifname ${WAN_IF} udp dport 443 ct state new accept
 
 # INPUT: drop IPv6 on WAN for these ports
-nft add rule inet input meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
-nft add rule inet input meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
+nft add rule inet filter input meta nfproto ipv6 iifname ${WAN_IF} tcp dport { 80, 443 } drop
+nft add rule inet filter input meta nfproto ipv6 iifname ${WAN_IF} udp dport 443 drop
 
 # INPUT: VPN interfaces fully trusted
-nft add rule inet input iifname wt0 accept
-nft add rule inet input iifname tailscale0 accept
+nft add rule inet filter input iifname wt0 accept
+nft add rule inet filter input iifname tailscale0 accept
 
 # INPUT: anti-spoofing
-nft add rule inet input ip saddr 100.64.0.0/10 iifname != wt0 drop
-nft add rule inet input ip saddr 100.100.0.0/8 iifname != tailscale0 drop
+nft add rule inet filter input ip saddr 100.64.0.0/10 iifname != wt0 drop
+nft add rule inet filter input ip saddr 100.100.0.0/8 iifname != tailscale0 drop
 
 # FORWARD: return traffic
-nft add rule inet forward ct state established,related accept
+nft add rule inet filter forward ct state established,related accept
 
 # FORWARD: WAN -> VPN (IPv4 only)
-nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
-nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
-nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
-nft add rule inet forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
+nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } ct state new accept
+nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif wt0 udp dport 443 ct state new accept
+nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } ct state new accept
+nft add rule inet filter forward meta nfproto ipv4 iif ${WAN_IF} oif tailscale0 udp dport 443 ct state new accept
 
 # FORWARD: drop IPv6 on these ports
-nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
-nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
-nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
-nft add rule inet forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
+nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 tcp dport { 80, 443 } drop
+nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif wt0 udp dport 443 drop
+nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 tcp dport { 80, 443 } drop
+nft add rule inet filter forward meta nfproto ipv6 iif ${WAN_IF} oif tailscale0 udp dport 443 drop
 
 log "OK" "Filter table applied (INPUT + FORWARD)"
 

@@ -132,12 +132,12 @@ apt upgrade -y || handle_error 1 "System upgrade failed" "ERROR"
 log "OK" "System upgrade complete"
 
 echo "[*] Installing required packages..."
-apt install -y nftables iptables wireguard-tools python3 bind9-dnsutils iproute2 curl wget iputils-ping jq tcpdump || \
+apt install -y nftables iptables wireguard-tools python3 bind9-dnsutils iproute2 curl wget iputils-ping jq tcpdump tmux || \
     handle_error 1 "Package installation failed" "CRITICAL"
 log "OK" "All packages installed"
 
 echo "[*] Verifying required tools..."
-critical_tools=("nft" "iptables" "wg" "python3" "getent" "ip" "curl" "wget" "ping" "ss" "tcpdump" "sysctl")
+critical_tools=("nft" "iptables" "wg" "python3" "getent" "ip" "curl" "wget" "ping" "ss" "tcpdump" "sysctl" "tmux")
 all_ok=true
 for tool in "${critical_tools[@]}"; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -188,6 +188,16 @@ log "OK" "iptables rules flushed"
 echo "[*] Flushing all nftables rules..."
 nft flush ruleset || handle_error 1 "nftables flush failed" "CRITICAL"
 log "OK" "nftables rules flushed"
+
+echo "[*] Disabling SSH service completely..."
+systemctl stop ssh 2>/dev/null || true
+systemctl disable ssh 2>/dev/null || true
+systemctl mask ssh 2>/dev/null || true
+log "OK" "SSH service stopped, disabled, and masked"
+
+echo "[*] Blocking SSH port 22 via nftables (belt and suspenders)..."
+nft add rule inet filter input tcp dport 22 drop 2>/dev/null || true
+log "OK" "SSH port 22 blocked in nftables"
 
 log "OK" "Cleanup complete"
 

@@ -691,6 +691,10 @@ table inet filter {
     }
 }
 
+# --------------------------------------------------------------------------
+# NAT: MASQUERADE approach (works like old-script.sh)
+# Backend sees ingress IP as source — simple and reliable.
+# --------------------------------------------------------------------------
 table ip nat {
 
     chain prerouting {
@@ -703,9 +707,30 @@ table ip nat {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
 
-        oifname WANIF ip saddr 100.64.0.0/10 snat to INGRESSIP
+        oifname WANIF masquerade
     }
 }
+
+# --------------------------------------------------------------------------
+# ALTERNATIVE: Transparent DNAT (no MASQUERADE) — FOR FUTURE USE
+#
+# This approach preserves the real client IP all the way to the backend.
+# Backend sees client's real source IP instead of ingress IP.
+#
+# Requirements for transparent DNAT:
+#   1. PREROUTING: DNAT to backend VPN IP (same as above)
+#   2. POSTROUTING: SNAT with ingress public IP for return traffic routing
+#      nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP
+#   3. Backend must route responses back through VPN to ingress (not direct)
+#   4. Backend kernel: net.ipv4.conf.all.rp_filter=0 or loose mode
+#   5. Backend default route must point to VPN gateway (not direct internet)
+#
+# The SNAT rule rewrites source IP from 100.64.x.x (VPN) to ingress public IP,
+# so return packets go back through ingress → VPN → backend.
+#
+# Status: NOT YET WORKING — external access from outside still fails.
+# Likely cause: Backend sends return packets directly to client (bypassing VPN).
+# --------------------------------------------------------------------------
 NFTEOF
 
 # Replace placeholders with actual values (sed on Linux does not need -i '' backup extension)
@@ -757,7 +782,7 @@ cat > "$UPDATE_SCRIPT" << 'DNATSCRIPT'
 #   Both VPNs DOWN                 → DNAT → cached IP (last-known-good)
 #   All paths dead                 → DNAT not updated (keep old rules, log error)
 #
-# The SNAT rules are also reapplied every cycle so that if the WAN interface or
+# The MASQUERADE rules are also reapplied every cycle so that if the WAN interface or
 # public IP changes (e.g. dynamic IP), the return path stays correct.
 # ====================================================================================
 
@@ -819,7 +844,7 @@ if [ -z "$BACKEND_IP" ]; then
     exit 1
 fi
 
-# Detect WAN interface + public IP for SNAT return path
+# Detect WAN interface + public IP for MASQUERADE return path
 WAN_IF=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | tr -d '\n')
 INGRESS_PUBLIC_IP=$(ip addr show "$WAN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 | head -n1 | tr -d '[:space:]')
 
@@ -833,7 +858,7 @@ nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; p
 nft add rule ip nat prerouting tcp dport 80 dnat to $BACKEND_IP || log "WARN" "DNAT rule tcp/80 failed"
 nft add rule ip nat prerouting tcp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule tcp/443 failed"
 nft add rule ip nat prerouting udp dport 443 dnat to $BACKEND_IP || log "WARN" "DNAT rule udp/443 failed"
-nft add rule ip nat postrouting oifname "$WAN_IF" ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP || log "WARN" "SNAT rule 100.64.0.0/10 failed"
+nft add rule ip nat postrouting oifname "$WAN_IF" masquerade || log "WARN" "MASQUERADE rule failed"
 
 # Update cache
 echo "$BACKEND_IP" > "$CACHE_FILE"
@@ -1031,7 +1056,7 @@ fi
 
 # ==== E. NAT TABLE ====
 echo ""
-echo "--- E: NAT Table (DNAT + SNAT) ---"
+echo "--- E: NAT Table (DNAT + MASQUERADE) ---"
 if [ "${T_B01:-FAIL}" = "PASS" ]; then
     NAT_PRE=$(nft list chain ip nat prerouting 2>/dev/null || true)
     NAT_POST=$(nft list chain ip nat postrouting 2>/dev/null || true)
@@ -1041,10 +1066,8 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
     check E04 "DNAT TCP 80+443 present"                      "echo '$NAT_PRE' | grep -q 'tcp dport 80.*dnat' && echo '$NAT_PRE' | grep -q 'tcp dport 443.*dnat'"
     check E05 "DNAT UDP 443 present (QUIC)"                  "echo '$NAT_PRE' | grep -q 'udp dport 443.*dnat'"
     check E06 "DNAT target is $BACKEND_IP"                   "echo '$NAT_PRE' | grep 'dnat to' | grep -q '$BACKEND_IP'"
-    check E07 "SNAT for 100.64.0.0/10 present"              "echo '$NAT_POST' | grep -q '100.64.0.0/10.*snat'"
-    check E08 "SNAT target is $INGRESS_PUBLIC_IP"            "echo '$NAT_POST' | grep 'snat to' | grep -q '$INGRESS_PUBLIC_IP'"
-    check E09 "DNAT count = 3 (TCP 80, TCP 443, UDP 443)"   "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 3 ]"
-    check E10 "SNAT count = 1 (100.64.0.0/10)"              "[ \$(echo '$NAT_POST' | grep -c 'snat to') -eq 1 ]"
+    check E07 "MASQUERADE present"                            "echo '$NAT_POST' | grep -q 'masquerade'"
+    check E08 "DNAT count = 3 (TCP 80, TCP 443, UDP 443)"   "[ \$(echo '$NAT_PRE' | grep -c 'dnat to') -eq 3 ]"
     DNAT_TARGETS=$(echo "$NAT_PRE" | grep 'dnat to' | sed 's/.*dnat to //' | sort -u | tr '\n' ' ')
 else
     echo "  [SKIP] E01-E11: nftables not running, cannot check NAT"
@@ -1255,7 +1278,7 @@ fi
 # ── 5. NAT table ──────────────────────────────────────────────────────────────
 if [ "${T_B01:-FAIL}" = "PASS" ]; then
     if [ "${T_E01:-FAIL}" = "FAIL" ]; then
-        issue "CRITICAL" "NAT table missing — no DNAT/SNAT possible"
+        issue "CRITICAL" "NAT table missing — no DNAT/MASQUERADE possible"
         echo "             Fix: nft add table ip nat"
     fi
     if [ "${T_E04:-FAIL}" = "FAIL" ]; then
@@ -1272,13 +1295,8 @@ if [ "${T_B01:-FAIL}" = "PASS" ]; then
         echo "             Fix: flush and re-add DNAT rules with correct target"
     fi
     if [ "${T_E07:-FAIL}" = "FAIL" ]; then
-        issue "CRITICAL" "NAT postrouting: no SNAT — client drops return packets (wrong source IP)"
-        echo "             → Backend response src=100.x.x.x arrives at client, client expects src=$INGRESS_PUBLIC_IP"
-        echo "             Fix: nft add rule ip nat postrouting oifname $WAN_IF ip saddr 100.64.0.0/10 snat to $INGRESS_PUBLIC_IP"
-    fi
-    if [ "${T_E08:-FAIL}" = "FAIL" ]; then
-        issue "CRITICAL" "NAT SNAT target is wrong — return packets have wrong source IP"
-        echo "             Expected: $INGRESS_PUBLIC_IP"
+        issue "CRITICAL" "NAT postrouting: no MASQUERADE — client drops return packets"
+        echo "             Fix: nft add rule ip nat postrouting oifname $WAN_IF masquerade"
     fi
 fi
 
@@ -1400,10 +1418,10 @@ if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
     issue "INFO" "Traffic path:"
     echo "             Client → $INGRESS_PUBLIC_IP:443"
     if [ -n "${DNAT_TARGETS:-}" ]; then echo "             DNAT → $DNAT_TARGETS"; fi
-    if [ "${T_E07:-FAIL}" = "PASS" ] && [ "${T_E08:-FAIL}" = "PASS" ]; then
-        echo "             SNAT ← $INGRESS_PUBLIC_IP (return path OK)"
+    if [ "${T_E07:-FAIL}" = "PASS" ]; then
+        echo "             MASQUERADE ← return path OK"
     else
-        echo "             SNAT ← MISSING (return path broken)"
+        echo "             MASQUERADE ← MISSING (return path broken)"
     fi
 fi
 

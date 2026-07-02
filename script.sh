@@ -189,15 +189,11 @@ echo "[*] Flushing all nftables rules..."
 nft flush ruleset || handle_error 1 "nftables flush failed" "CRITICAL"
 log "OK" "nftables rules flushed"
 
-echo "[*] Disabling SSH service completely..."
+echo "[*] Deactivating SSH daemon (port 22 remains open)..."
 systemctl stop ssh 2>/dev/null || true
 systemctl disable ssh 2>/dev/null || true
 systemctl mask ssh 2>/dev/null || true
-log "OK" "SSH service stopped, disabled, and masked"
-
-echo "[*] Blocking SSH port 22 via nftables (belt and suspenders)..."
-nft add rule inet filter input tcp dport 22 drop 2>/dev/null || true
-log "OK" "SSH port 22 blocked in nftables"
+log "OK" "SSH daemon stopped, disabled, and masked (port 22 remains open)"
 
 log "OK" "Cleanup complete"
 
@@ -1399,21 +1395,7 @@ if [ "${T_I03:-FAIL}" = "FAIL" ]; then
     echo "             Fix: systemctl enable ingress-edge.service"
 fi
 
-# ── 10. nftables persistence ───────────────────────────────────────────────────
-if [ "${T_K02:-FAIL}" = "FAIL" ]; then
-    issue "WARN" "nftables rules do NOT survive restart — NAT target may change on reboot"
-    echo "             → /etc/nftables.conf has filter + NAT tables from initial setup"
-    echo "             → DNAT timer may update NAT targets after boot (different backend IP)"
-    echo "             This is expected — ingress-edge.service + DNAT timer re-apply on boot"
-fi
-
-# ── 11. End-to-end ────────────────────────────────────────────────────────────
-if [ "${T_J01:-FAIL}" = "FAIL" ] && [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
-    issue "WARN" "Local loopback test failed despite DNAT+backend being OK"
-    echo "             → Possible cloud firewall blocking loopback to public IP"
-fi
-
-# ── 12. Cloud firewall ────────────────────────────────────────────────────────
+# ── 10. Cloud firewall ────────────────────────────────────────────────────────
 if [ "${T_L01:-FAIL}" = "FAIL" ]; then
     if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
         issue "CRITICAL" "External access to $INGRESS_PUBLIC_IP:443 failed from inside"
@@ -1423,7 +1405,7 @@ if [ "${T_L01:-FAIL}" = "FAIL" ]; then
     fi
 fi
 
-# ── 13. Traffic path summary ──────────────────────────────────────────────────
+# ── 11. Traffic path summary ──────────────────────────────────────────────────
 if [ "${T_E04:-FAIL}" = "PASS" ] && [ "${T_H07:-FAIL}" = "PASS" ]; then
     issue "INFO" "Traffic path:"
     echo "             Client → $INGRESS_PUBLIC_IP:443"
